@@ -12,6 +12,7 @@ import shutil
 import asyncio
 import logging
 import requests
+import zipfile
 from typing import List, Dict, Any, Optional
 from threading import Lock
 import httpx
@@ -720,6 +721,13 @@ class CanvasSaveRequest(BaseModel):
     logs: List[Dict[str, Any]] = []
     client_id: str = ""
     base_updated_at: int = 0
+
+class CanvasAssetCheckRequest(BaseModel):
+    urls: List[str] = []
+
+class CanvasAssetDownloadRequest(BaseModel):
+    urls: List[str] = []
+    filename: str = "canvas-output-images.zip"
 
 # --- 负载均衡 ---
 
@@ -1798,6 +1806,7 @@ async def ai_config():
         "chat_models": CHAT_MODELS,
         "image_models": IMAGE_MODELS,
         "video_models": VIDEO_MODELS,
+        "comfy_instances": COMFYUI_INSTANCES,
         "api_providers": providers,
         "has_api_key": bool(AI_API_KEY),
         "ms_chat_models": MODELSCOPE_CHAT_MODELS,
@@ -2478,6 +2487,52 @@ async def get_canvas_meta(canvas_id: str):
 @app.get("/api/canvases/{canvas_id}")
 async def get_canvas(canvas_id: str):
     return {"canvas": load_canvas(canvas_id)}
+
+@app.post("/api/canvas-assets/check")
+async def check_canvas_assets(payload: CanvasAssetCheckRequest):
+    result = {}
+    for url in payload.urls[:3000]:
+        text = str(url or "").strip()
+        if not text:
+            continue
+        if text.startswith("/output/") or text.startswith("/assets/"):
+            result[text] = bool(output_file_from_url(text))
+        else:
+            result[text] = True
+    return {"exists": result}
+
+@app.post("/api/canvas-assets/download")
+async def download_canvas_assets(payload: CanvasAssetDownloadRequest):
+    buffer = BytesIO()
+    used_names = set()
+    count = 0
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for url in payload.urls[:1000]:
+            text = str(url or "").strip()
+            if not text or not (text.startswith("/output/") or text.startswith("/assets/")):
+                continue
+            path = output_file_from_url(text)
+            if not path or not os.path.isfile(path):
+                continue
+            base = os.path.basename(path) or f"image-{count + 1}.png"
+            name, ext = os.path.splitext(base)
+            archive_name = base
+            suffix = 2
+            while archive_name in used_names:
+                archive_name = f"{name}-{suffix}{ext}"
+                suffix += 1
+            used_names.add(archive_name)
+            zf.write(path, archive_name)
+            count += 1
+    if count <= 0:
+        raise HTTPException(status_code=404, detail="没有可下载的本地图片")
+    buffer.seek(0)
+    filename = re.sub(r'[\\/:*?"<>|]+', "_", payload.filename or "canvas-output-images.zip")
+    if not filename.lower().endswith(".zip"):
+        filename += ".zip"
+    encoded = urllib.parse.quote(filename)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"}
+    return Response(buffer.getvalue(), media_type="application/zip", headers=headers)
 
 @app.put("/api/canvases/{canvas_id}")
 async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
