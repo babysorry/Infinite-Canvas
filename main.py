@@ -1131,7 +1131,7 @@ def selected_model(requested, fallback):
     model = (requested or fallback).strip()
     if not model:
         raise HTTPException(status_code=400, detail="模型名称不能为空")
-    if len(model) > 120 or not re.fullmatch(r"[a-zA-Z0-9_.:/+-]+", model):
+    if len(model) > 240 or any(ord(ch) < 32 or ord(ch) == 127 for ch in model):
         raise HTTPException(status_code=400, detail=f"模型名称不合法：{model}")
     return model
 
