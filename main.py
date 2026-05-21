@@ -4,6 +4,8 @@ import base64
 import urllib.request
 import urllib.parse
 import urllib.error
+import ssl
+import certifi
 import os
 import re
 import random
@@ -688,7 +690,7 @@ def github_json(url: str, use_etag_cache: bool = False):
             headers["If-None-Match"] = GITHUB_TREE_CACHE["etag"]
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as resp:
             etag = resp.headers.get("ETag", "")
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
             if use_etag_cache and cache_key == GITHUB_TREE_URL:
@@ -705,9 +707,13 @@ def github_json(url: str, use_etag_cache: bool = False):
             return GITHUB_TREE_CACHE["data"]
         raise
 
+def _ssl_context():
+    """使用 certifi 证书包，兼容 python.org 安装的 macOS Python（不信任系统证书）"""
+    return ssl.create_default_context(cafile=certifi.where())
+
 def github_bytes(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Infinite-Canvas-Updater"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as resp:
         return resp.read()
 
 def safe_update_target(path: str) -> str:
