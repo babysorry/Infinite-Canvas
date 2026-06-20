@@ -1210,6 +1210,11 @@ function smartGroupScopeId(nodeId){
 // item 是 imageForDisplay 后的展示对象。预览左右切换、批量下载、宫格拼接都以它为数据源。
 function smartGroupImageRefs(group){
     if(!isSmartGroupNode(group)) return [];
+    const refs = [];
+    (group.images || []).forEach((img, index) => {
+        const item = imageForDisplay(img);
+        if(item?.url) refs.push({nodeId:group.id, index, source:img, item});
+    });
     const members = smartGroupMembers(group)
         .filter(isSmartImageNode)
         .slice()
@@ -1219,7 +1224,6 @@ function smartGroupImageRefs(group){
             if(Math.abs(dy) > 24) return dy;
             return (Number(ra.x) || 0) - (Number(rb.x) || 0);
         });
-    const refs = [];
     members.forEach(node => {
         (node.images || []).forEach((img, index) => {
             const item = imageForDisplay(img);
@@ -1227,6 +1231,64 @@ function smartGroupImageRefs(group){
         });
     });
     return refs;
+}
+function smartGroupThumbLayout(node){
+    const refs = smartGroupImageRefs(node).filter(ref => ref.item?.url);
+    if(!refs.length) return null;
+    const items = refs.map(ref => ref.item);
+    const explicitW = Number(node?.w);
+    const explicitH = Number(node?.h);
+    const hasExplicit = Number.isFinite(explicitW) && explicitW >= SMART_GROUP_MIN_WIDTH
+        && Number.isFinite(explicitH) && explicitH >= SMART_GROUP_MIN_HEIGHT;
+    const scale = mediaNodeDefaultScale({type:'smart-image', images:items, scale:node?.scale});
+    const summarySpace = 28;
+    const outerPad = 32;
+    if(refs.length === 1){
+        if(hasExplicit){
+            return {
+                refs,
+                cols:1,
+                rows:1,
+                visibleRows:1,
+                width:Math.round(explicitW),
+                height:Math.round(explicitH),
+                thumb:Math.round(96 * scale),
+                single:true,
+                innerW:Math.max(24, Math.round(explicitW - outerPad)),
+                innerH:Math.max(24, Math.round(explicitH - outerPad - summarySpace))
+            };
+        }
+        const single = singleImageLayout(refs[0].item, {}, scale);
+        return {
+            refs,
+            ...single,
+            width:Math.max(SMART_GROUP_MIN_WIDTH, Math.round(single.width + outerPad)),
+            height:Math.max(SMART_GROUP_MIN_HEIGHT, Math.round(single.height + outerPad + summarySpace)),
+            innerW:single.width,
+            innerH:single.height
+        };
+    }
+    const gap = 8;
+    if(hasExplicit){
+        const fitted = groupImageGridLayout(refs.length, Math.max(72, explicitW - outerPad), Math.max(56, explicitH - outerPad - summarySpace), 100000, 0, gap, SMART_GROUP_MAX_VISIBLE_ROWS);
+        return {...fitted, refs, width:Math.round(explicitW), height:Math.round(explicitH)};
+    }
+    const thumb = Math.round(MEDIA_GROUP_THUMB_BASE * scale);
+    const cell = thumb + gap;
+    const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(refs.length))));
+    const rows = Math.ceil(refs.length / cols);
+    const visibleRows = Math.min(SMART_GROUP_MAX_VISIBLE_ROWS, rows);
+    const gridW = cols * thumb + (cols - 1) * gap;
+    const gridH = visibleRows * cell - gap;
+    return {
+        refs,
+        cols,
+        rows,
+        visibleRows,
+        thumb,
+        width:Math.max(SMART_GROUP_MIN_WIDTH, Math.round(gridW + outerPad)),
+        height:Math.max(SMART_GROUP_MIN_HEIGHT, Math.round(gridH + outerPad + summarySpace))
+    };
 }
 const SMART_GROUP_ARRANGE_PADDING = 18;
 const SMART_GROUP_ARRANGE_GAP = 16;
@@ -1526,7 +1588,8 @@ function smartGroupImageGridLayout(node){
 }
 function imageLayout(images, scale=1, node=null){
     if(node?.type === 'smart-group'){
-        if((node.images || []).some(img => img?.url)) return smartGroupImageGridLayout(node);
+        const groupThumbLayout = smartGroupThumbLayout(node);
+        if(groupThumbLayout) return groupThumbLayout;
         return {cols:1, rows:1, ...smartGroupLayoutSize(node), thumb:96, single:true};
     }
     if(node?.type === 'smart-prompt') return {cols:1, rows:1, ...promptNodeLayoutSize(node), thumb:96, single:true};
@@ -5479,7 +5542,7 @@ function updateNodeElementDuringResize(node){
         render();
         return;
     }
-    const imgs = node.images || [];
+    const imgs = isSmartGroupNode(node) ? smartGroupImageRefs(node).map(ref => ref.item) : (node.images || []);
     const layout = imageLayout(imgs, nodeScale(node), node);
     el.style.width = `${layout.width}px`;
     el.style.height = `${layout.height}px`;
@@ -5515,15 +5578,17 @@ function updateNodeElementDuringResize(node){
         const wrap = body.querySelector('.image-wrap');
         if(wrap){
             // 分组单图卡片含 16px 内边距（PAD=32），图片按内边距内的尺寸显示，避免溢出边框。
-            const wrapW = isSmartGroupNode(node) ? Math.max(24, Number(layout.width) - 32) : layout.width;
-            const wrapH = isSmartGroupNode(node) ? Math.max(24, Number(layout.height) - 32) : layout.height;
+            const wrapW = isSmartGroupNode(node) ? Math.max(24, Number(layout.innerW || 0) || (Number(layout.width) - 32)) : layout.width;
+            const wrapH = isSmartGroupNode(node) ? Math.max(24, Number(layout.innerH || 0) || (Number(layout.height) - 60)) : layout.height;
             wrap.style.setProperty('--node-img-w', `${wrapW}px`);
             wrap.style.setProperty('--node-img-h', `${wrapH}px`);
         }
         const media = body.querySelector('.node-img');
         if(media){
-            media.style.width = `${layout.width}px`;
-            media.style.height = `${layout.height}px`;
+            const mediaW = isSmartGroupNode(node) ? Math.max(24, Number(layout.innerW || 0) || (Number(layout.width) - 32)) : layout.width;
+            const mediaH = isSmartGroupNode(node) ? Math.max(24, Number(layout.innerH || 0) || (Number(layout.height) - 60)) : layout.height;
+            media.style.width = `${mediaW}px`;
+            media.style.height = `${mediaH}px`;
         }
     }
     const active = selectedNode();
@@ -6322,33 +6387,40 @@ function smartLoopBodyHtml(node){
     </div>`;
 }
 function smartGroupBodyHtml(node){
-    // 组内图片收进卡片，渲染成可滚动缩略图网格（跟多图节点一致，超过 4 排出现滚动）。
-    const imgs = (node.images || []).map(imageForDisplay).filter(img => img?.url);
-    if(imgs.length){
-        const layout = imageLayout(node.images || [], nodeScale(node), node);
-        if(imgs.length === 1){
-            const img = imgs[0];
-            // 外框含 16px 内边距（PAD=32）；图片按内边距内的可用空间显示，避免溢出到边框外。
-            const innerW = Math.max(24, Number(layout.width) - 32);
-            const innerH = Math.max(24, Number(layout.height) - 32);
-            return `<div class="image-wrap ${selectedImage.nodeId === node.id && selectedImage.index === 0 ? 'image-selected' : ''}" data-image-index="0" data-media-signature="${escapeAttr(`${mediaKindForItem(img)}:${img?.url || ''}`)}" style="--node-img-w:${innerW}px;--node-img-h:${innerH}px">${singleMediaHtml(img, innerW, innerH)}${imageResolutionBadgeHtml(img)}<button class="mini-x image-delete" type="button" data-image-index="0" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`;
-        }
-        const visibleRows = Math.max(1, Math.min(SMART_GROUP_MAX_VISIBLE_ROWS, Number(layout.visibleRows || layout.rows || 1)));
-        const maxHeight = visibleRows * Number(layout.thumb || 96) + Math.max(0, visibleRows - 1) * 8;
-        return `<div class="thumb-grid" data-thumb-scroll="1" style="--thumb-cols:${layout.cols}; --thumb-size:${layout.thumb}px; --thumb-max-height:${maxHeight}px">${imgs.map((img, i) => `<div class="thumb-item ${selectedImage.nodeId === node.id && selectedImage.index === i ? 'image-selected' : ''}" data-image-index="${i}" data-media-signature="${escapeAttr(`${mediaKindForItem(img)}:${img?.url || ''}`)}">${thumbMediaHtml(img)}${imageResolutionBadgeHtml(img)}<button class="mini-x image-delete" type="button" data-image-index="${i}" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`).join('')}</div>`;
-    }
+    const groupThumbLayout = smartGroupThumbLayout(node);
+    const refThumbs = groupThumbLayout?.refs || [];
     const members = smartGroupMembers(node);
     const counts = members.reduce((acc, member) => {
         if(member.type === 'smart-prompt') acc.prompt += 1;
         else if(member.type === 'smart-loop') acc.loop += 1;
-        else if(isSmartImageNode(member)) acc.media += Math.max(1, (member.images || []).filter(img => img?.url).length || 1);
         return acc;
-    }, {prompt:0, media:0, loop:0});
+    }, {prompt:0, media:refThumbs.length, loop:0});
     const summary = [
         counts.prompt ? `${counts.prompt} 提示词` : '',
-        counts.media ? `${counts.media} 素材` : '',
+        counts.media ? `${counts.media} 图片` : '',
         counts.loop ? `${counts.loop} 循环` : ''
     ].filter(Boolean).join(' · ') || '双击或拖入图片';
+    if(refThumbs.length){
+        if(refThumbs.length === 1){
+            const ref = refThumbs[0];
+            const innerW = Math.max(24, Number(groupThumbLayout.innerW || groupThumbLayout.width || SMART_GROUP_DEFAULT_WIDTH));
+            const innerH = Math.max(24, Number(groupThumbLayout.innerH || groupThumbLayout.height || SMART_GROUP_DEFAULT_HEIGHT));
+            const canDelete = ref.nodeId === node.id;
+            return `<div class="smart-group-card has-thumbs">
+                <div class="smart-group-summary"><i data-lucide="group"></i><span>${escapeHtml(summary)}</span></div>
+                <div class="image-wrap smart-group-single-thumb ${selectedImage.nodeId === ref.nodeId && Number(selectedImage.index) === Number(ref.index) ? 'image-selected' : ''}" data-ref-node-id="${escapeAttr(ref.nodeId)}" data-ref-image-index="${ref.index}" data-image-index="${ref.index}" data-media-signature="${escapeAttr(`${mediaKindForItem(ref.item)}:${ref.item?.url || ''}`)}" style="--node-img-w:${innerW}px;--node-img-h:${innerH}px">${singleMediaHtml(ref.item, innerW, innerH)}${imageResolutionBadgeHtml(ref.item)}${canDelete ? `<button class="mini-x image-delete" type="button" data-image-index="${ref.index}" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button>` : ''}</div>
+            </div>`;
+        }
+        const visibleRows = Math.max(1, Math.min(SMART_GROUP_MAX_VISIBLE_ROWS, Number(groupThumbLayout.visibleRows || groupThumbLayout.rows || 1)));
+        const maxHeight = Math.max(44, visibleRows * Number(groupThumbLayout.thumb || 96) + Math.max(0, visibleRows - 1) * 8);
+        return `<div class="smart-group-card has-thumbs">
+            <div class="smart-group-summary"><i data-lucide="group"></i><span>${escapeHtml(summary)}</span></div>
+            <div class="thumb-grid smart-group-thumb-grid" data-thumb-scroll="1" style="--thumb-cols:${groupThumbLayout.cols}; --thumb-size:${groupThumbLayout.thumb}px; --thumb-max-height:${maxHeight}px">${refThumbs.map(ref => {
+                const canDelete = ref.nodeId === node.id;
+                return `<div class="thumb-item ${selectedImage.nodeId === ref.nodeId && Number(selectedImage.index) === Number(ref.index) ? 'image-selected' : ''}" data-ref-node-id="${escapeAttr(ref.nodeId)}" data-ref-image-index="${ref.index}" data-image-index="${ref.index}" data-media-signature="${escapeAttr(`${mediaKindForItem(ref.item)}:${ref.item?.url || ''}`)}">${thumbMediaHtml(ref.item)}${imageResolutionBadgeHtml(ref.item)}${canDelete ? `<button class="mini-x image-delete" type="button" data-image-index="${ref.index}" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button>` : ''}</div>`;
+            }).join('')}</div>
+        </div>`;
+    }
     return `<div class="smart-group-card">
         <div class="smart-group-summary"><i data-lucide="group"></i><span>${escapeHtml(summary)}</span></div>
         ${members.length ? '' : `<div class="smart-group-empty"><i data-lucide="plus"></i><span>拖入图片自动收进分组</span></div>`}
@@ -6723,8 +6795,10 @@ function measureSmartNodeImages(){
     world.querySelectorAll('.image-node img,.image-node video').forEach(imgEl => {
         const nodeEl = imgEl.closest('.image-node');
         const itemEl = imgEl.closest('[data-image-index]');
-        const node = nodes.find(n => n.id === nodeEl?.dataset.id);
-        const index = Number(itemEl?.dataset.imageIndex ?? 0);
+        const containerNode = nodes.find(n => n.id === nodeEl?.dataset.id);
+        const targetNodeId = itemEl?.dataset.refNodeId || nodeEl?.dataset.id;
+        const index = Number(itemEl?.dataset.refImageIndex ?? itemEl?.dataset.imageIndex ?? 0);
+        const node = nodes.find(n => n.id === targetNodeId);
         const image = node?.images?.[index];
         if(imgEl.tagName?.toLowerCase() === 'img' && image?.url) bindImageProxyFallback(imgEl, image);
         if(!node || !image || image.natural_w || image.natural_h) return;
@@ -6741,12 +6815,13 @@ function measureSmartNodeImages(){
                 delete image.layout_h;
                 applyThumbDisplaySizeToElement(itemEl, image, Math.max(itemEl?.clientWidth || 0, itemEl?.clientHeight || 0));
                 updateImageResolutionBadgeElement(itemEl, image);
-                if((node.images || []).length === 1 && !node.w && !node.h){
+                if(!isSmartGroupNode(node) && (node.images || []).length === 1 && !node.w && !node.h){
                     const layout = singleImageLayout(image, node, mediaNodeDefaultScale(node));
                     node.w = layout.width;
                     node.h = layout.height;
                 }
                 updateNodeElementDuringResize(node);
+                if(containerNode && containerNode.id !== node.id) updateNodeElementDuringResize(containerNode);
                 if(isNodeSelected(node.id)) updateComposer();
                 scheduleSave();
             });
@@ -6770,12 +6845,13 @@ function measureSmartNodeImages(){
             }
             applyThumbDisplaySizeToElement(itemEl, image, Math.max(itemEl?.clientWidth || 0, itemEl?.clientHeight || 0));
             updateImageResolutionBadgeElement(itemEl, image);
-            if((node.images || []).length === 1 && !node.w && !node.h){
+            if(!isSmartGroupNode(node) && (node.images || []).length === 1 && !node.w && !node.h){
                 const layout = singleImageLayout(image, node, mediaNodeDefaultScale(node));
                 node.w = layout.width;
                 node.h = layout.height;
             }
             updateNodeElementDuringResize(node);
+            if(containerNode && containerNode.id !== node.id) updateNodeElementDuringResize(containerNode);
             if(isNodeSelected(node.id)) updateComposer();
             scheduleSave();
         };
@@ -7344,8 +7420,9 @@ function bindNodeEvents(){
                 e.stopPropagation();
                 e.stopImmediatePropagation();
                 const item = btn.closest('[data-image-index]');
-                const imageIndex = Number(item?.dataset.imageIndex || 0);
-                const owner = nodes.find(n => n.id === id);
+                const targetNodeId = item?.dataset.refNodeId || id;
+                const imageIndex = Number(item?.dataset.refImageIndex ?? item?.dataset.imageIndex ?? 0);
+                const owner = nodes.find(n => n.id === targetNodeId);
                 if(mediaKindForItem(owner?.images?.[imageIndex] || {}) !== 'video') return;
                 clearImageClickTimer();
                 suppressImageClickUntil = Date.now() + 260;
@@ -7354,6 +7431,12 @@ function bindNodeEvents(){
             }, true);
         });
         el.querySelectorAll('.thumb-item,.image-wrap').forEach(item => {
+            const thumbTarget = () => {
+                const targetNodeId = item.dataset.refNodeId || id;
+                const imageIndex = Number(item.dataset.refImageIndex ?? item.dataset.imageIndex ?? 0);
+                const owner = nodes.find(n => n.id === targetNodeId);
+                return {targetNodeId, imageIndex, owner, image:owner?.images?.[imageIndex]};
+            };
             item.setAttribute('draggable', 'false');
             item.addEventListener('dragstart', e => {
                 e.preventDefault();
@@ -7367,16 +7450,15 @@ function bindNodeEvents(){
                 e.stopImmediatePropagation();
                 clearImageClickTimer();
                 suppressImageClickUntil = Date.now() + 260;
-                const imageIndex = Number(item.dataset.imageIndex || 0);
-                const owner = nodes.find(n => n.id === id);
-                if(mediaKindForItem(owner?.images?.[imageIndex] || {}) === 'video'){
+                const target = thumbTarget();
+                if(mediaKindForItem(target.image || {}) === 'video'){
                     smartActivateVideoPreview(item);
                     return;
                 }
                 selectedId = id;
                 selectedIds = [];
-                selectedImage = {nodeId:id, index:imageIndex};
-                openImagePreviewSmart(id, imageIndex);
+                selectedImage = {nodeId:target.targetNodeId, index:target.imageIndex};
+                openImagePreviewSmart(target.targetNodeId, target.imageIndex);
             }, true);
             item.addEventListener('click', e => {
                 if(e.target.closest('video,audio')) return;
@@ -7385,12 +7467,12 @@ function bindNodeEvents(){
                 e.stopPropagation();
                 e.stopImmediatePropagation();
                 if(Date.now() < suppressImageClickUntil) return;
-                const imageIndex = Number(item.dataset.imageIndex || 0);
+                const target = thumbTarget();
                 const owner = nodes.find(n => n.id === id);
-                if(mediaKindForItem(owner?.images?.[imageIndex] || {}) === 'video'){
+                if(mediaKindForItem(target.image || {}) === 'video'){
                     clearImageClickTimer();
                     suppressImageClickUntil = Date.now() + 260;
-                    hideRunTimerForNode(owner);
+                    hideRunTimerForNode(target.owner || owner);
                     smartActivateVideoPreview(item);
                     return;
                 }
@@ -7399,19 +7481,18 @@ function bindNodeEvents(){
                     suppressImageClickUntil = Date.now() + 260;
                     selectedId = id;
                     selectedIds = [];
-                    selectedImage = {nodeId:id, index:imageIndex};
-                    openImagePreviewSmart(id, imageIndex);
+                    selectedImage = {nodeId:target.targetNodeId, index:target.imageIndex};
+                    openImagePreviewSmart(target.targetNodeId, target.imageIndex);
                     return;
                 }
                 clearImageClickTimer();
                 imageClickTimer = setTimeout(() => {
                     imageClickTimer = null;
                 hideRunTimerForNode(owner);
-                const isGroupOwner = (owner?.images || []).length > 1;
                 selectedId = id;
                 selectedIds = [];
                 // Composer 绑定节点本身；这里记录图层焦点，用于交叠时置顶和工具栏目标。
-                selectedImage = {nodeId:id, index:imageIndex};
+                selectedImage = {nodeId:target.targetNodeId, index:target.imageIndex};
                     if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
                     syncSelectionUi();
                     updateComposer();
@@ -7425,16 +7506,15 @@ function bindNodeEvents(){
             e.stopImmediatePropagation();
             clearImageClickTimer();
             suppressImageClickUntil = Date.now() + 260;
-            const imageIndex = Number(item.dataset.imageIndex || 0);
-            const owner = nodes.find(n => n.id === id);
-            if(mediaKindForItem(owner?.images?.[imageIndex] || {}) === 'video'){
+            const target = thumbTarget();
+            if(mediaKindForItem(target.image || {}) === 'video'){
                 smartActivateVideoPreview(item);
                 return;
             }
             selectedId = id;
             selectedIds = [];
-            selectedImage = {nodeId:id, index:imageIndex};
-            openImagePreviewSmart(id, imageIndex);
+            selectedImage = {nodeId:target.targetNodeId, index:target.imageIndex};
+            openImagePreviewSmart(target.targetNodeId, target.imageIndex);
         }, true);
         });
         el.querySelectorAll('.thumb-item').forEach(item => {
@@ -7442,6 +7522,7 @@ function bindNodeEvents(){
                 if(e.target.closest('video,audio')) return;
                 if(e.button !== 0 || e.target.closest('.mini-x')) return;
                 if(e.detail >= 2) return;
+                if(item.dataset.refNodeId) return;
                 const node = nodes.find(n => n.id === id);
                 if(!node || (node.images || []).length <= 1) return;
                 e.preventDefault(); e.stopPropagation();
@@ -11072,7 +11153,13 @@ function cleanupDetachedRunInputRefs(){
 }
 function imagesForNode(node){
     if(isSmartGroupNode(node)){
-        return smartGroupMembers(node).flatMap(member => imagesForNode(member));
+        return smartGroupImageRefs(node).map((ref, index) => ({
+            ...ref.item,
+            nodeId:ref.nodeId,
+            imageIndex:ref.index,
+            groupNodeId:node.id,
+            groupImageIndex:index
+        }));
     }
     return (node?.images || []).map((img, index) => ({...imageForDisplay(img), nodeId:node.id, imageIndex:index}));
 }
@@ -14462,7 +14549,7 @@ window.onmousemove = e => {
         const dy = (e.clientY - resizeState.startY) / viewport.scale;
         const minW = node.type === 'smart-prompt' ? 260 : node.type === 'smart-loop' ? 252 : node.type === 'smart-group' ? SMART_GROUP_MIN_WIDTH : 48;
         const minH = node.type === 'smart-prompt' ? 170 : node.type === 'smart-loop' ? 132 : node.type === 'smart-group' ? SMART_GROUP_MIN_HEIGHT : 48;
-        if(node.type === 'smart-group' && (node.images || []).some(img => img?.url)){
+        if(node.type === 'smart-group' && smartGroupImageRefs(node).some(ref => ref.item?.url)){
             // 图片分组：和普通节点一样直接改 w/h，缩略图网格按新尺寸实时重排。不要走下面的“成员缩放”那套，
             // 否则拖动过程里会按成员包围盒/缩放比例收缩，松手才回到拖动宽度（用户反馈的“变宽时先缩小”）。
             node.w = Math.max(minW, Math.round(resizeState.startW + dx));
