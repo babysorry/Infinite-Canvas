@@ -180,6 +180,36 @@ class SavedProviderCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(response.headers["cache-control"], "no-store")
 
+    def test_canvas_config_uses_only_saved_codex_chat_models(self):
+        saved_providers = [
+            {
+                "id": "codex",
+                "name": "GPT CLI",
+                "protocol": "codex",
+                "enabled": True,
+                "chat_models": ["gpt-5.6-sol"],
+                "image_models": ["gpt-image-2"],
+            }
+        ]
+        with patch.object(
+            main,
+            "public_api_providers",
+            return_value=saved_providers,
+        ), patch.object(
+            main,
+            "codex_cli_model_catalog",
+        ) as catalog:
+            response = Response()
+            payload = asyncio.run(main.ai_config(response))
+
+        codex = next(
+            provider
+            for provider in payload["api_providers"]
+            if provider["id"] == "codex"
+        )
+        self.assertEqual(codex["chat_models"], ["gpt-5.6-sol"])
+        catalog.assert_not_called()
+
     def test_legacy_string_models_and_audio_metadata_normalize_together(self):
         provider = main.normalize_provider(
             {
