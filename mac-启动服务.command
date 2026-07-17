@@ -11,12 +11,11 @@ echo ""
 echo "修复权限中..."
 
 # 移除安全限制（只针对实际存在的文件类型）
-xattr -r -d com.apple.quarantine *.command 2>/dev/null
+xattr -r -d com.apple.quarantine mac-启动服务.command mac-修复权限.command 2>/dev/null
 xattr -r -d com.apple.quarantine main.py 2>/dev/null
 
-# 设置执行权限（修正：原脚本引用了不存在的 启动服务.command/启动服务.py）
-chmod +x *.command 2>/dev/null
-chmod +x main.py 2>/dev/null
+# 只修复启动脚本权限，避免每次启动都改变其他受 Git 管理文件的模式。
+chmod +x mac-启动服务.command mac-修复权限.command mac-启动服务.sh mac-安装依赖.sh 2>/dev/null
 
 echo "权限已修复！"
 echo ""
@@ -40,16 +39,5 @@ echo "本机访问： http://127.0.0.1:3000/"
 echo "============================================"
 echo ""
 
-# 优先使用 Homebrew Python，避免部分工具管理的 Python 签名问题
-if [ -x /opt/homebrew/bin/python3 ]; then
-    /opt/homebrew/bin/python3 main.py
-elif [ -x /usr/local/bin/python3 ]; then
-    /usr/local/bin/python3 main.py
-elif command -v python3 >/dev/null 2>&1; then
-    python3 main.py
-else
-    echo "错误：找不到 Python3，请先安装 Python 3.10+："
-    echo "https://www.python.org/downloads/"
-    read -p "按 Enter 键退出..."
-    exit 1
-fi
+# 统一交给项目启动脚本；它会创建独立 Python 环境并检查依赖。
+exec /bin/bash ./mac-启动服务.sh

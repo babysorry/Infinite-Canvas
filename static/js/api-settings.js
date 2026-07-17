@@ -31,6 +31,7 @@ const jimengHelpOutput = document.getElementById('jimengHelpOutput');
 const codexCliPanel = document.getElementById('codexCliPanel');
 const codexCliStatus = document.getElementById('codexCliStatus');
 const codexCliInfo = document.getElementById('codexCliInfo');
+const codexProxyInput = document.getElementById('codexProxyInput');
 const codexHelpOverlay = document.getElementById('codexHelpOverlay');
 const codexHelpCommand = document.getElementById('codexHelpCommand');
 const codexHelpOutput = document.getElementById('codexHelpOutput');
@@ -141,7 +142,7 @@ function applyCliProtocolDefaults(item, protocol){
         item.chat_models = unique(item.chat_models || []);
     } else if(value === 'codex'){
         item.image_models = unique([...(item.image_models || []).filter(model => String(model || '').trim().toLowerCase() !== '$imagegen'), ...CODEX_DEFAULT_IMAGE_MODELS]);
-        item.chat_models = unique([...(item.chat_models || []), ...CODEX_DEFAULT_CHAT_MODELS]);
+        item.chat_models = unique((item.chat_models || []).length ? item.chat_models : CODEX_DEFAULT_CHAT_MODELS);
         item.video_models = [];
     } else if(value === 'gemini-cli'){
         item.image_models = unique([...(item.image_models || []), ...GEMINI_CLI_DEFAULT_IMAGE_MODELS]);
@@ -826,6 +827,9 @@ function syncEditor(){
         if(sk) item.volcengine_secret_access_key = sk;
         item.volcengine_project_name = (volcProjectInput?.value.trim() || VOLCENGINE_DEFAULT_PROJECT_NAME);
         item.volcengine_region = (volcRegionInput?.value.trim() || VOLCENGINE_DEFAULT_REGION);
+    }
+    if(String(item.protocol || '').toLowerCase() === 'codex'){
+        item.proxy_url = codexProxyInput?.value.trim() || '';
     }
 }
 function ensureRunningHubLists(item){
@@ -2555,6 +2559,7 @@ function renderEditor(){
     }
     if(isCodex){
         applyCliProtocolDefaults(item, 'codex');
+        if(codexProxyInput) codexProxyInput.value = item.proxy_url || '';
         keyInput.placeholder = 'OpenAI CLI 使用本机 codex login，无需 API Key';
         keyHint.textContent = '请先安装 OpenAI Codex CLI，并执行 codex 登录';
     }
@@ -3916,6 +3921,7 @@ async function saveProviders(){
                 image_edit_route:item.image_edit_route || 'general',
                 image_generation_endpoint:item.image_generation_endpoint || '',
                 image_edit_endpoint:item.image_edit_endpoint || '',
+                proxy_url:item.proxy_url || '',
                 enabled:item.enabled !== false,
                 primary:false,
                 image_models:item.image_models || [],

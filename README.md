@@ -1,6 +1,14 @@
 # Infinite-Canvas
 Supports comfyui/API calls/modelscope calls
 
+## macOS 启动
+
+1. 首次使用时，双击 `mac-修复权限.command`。
+2. 双击 `mac-启动服务.command`。启动器会自动创建独立 Python 环境并安装缺失依赖。
+3. 浏览器会打开 [http://127.0.0.1:3000/](http://127.0.0.1:3000/)。
+
+终端也可以运行 `./mac-启动服务.sh`。这是 Python/FastAPI 项目，不需要使用 `npm run dev`。
+
 配套的chrome采集插件已经上线：https://chromewebstore.google.com/detail/infinite-canvas-%E5%9B%BE%E5%83%8F%E8%A7%86%E9%A2%91%E6%96%87%E5%AD%97%E6%8A%93%E5%8F%96%E5%B7%A5/ajfhnbklbmpfaaookhfakohabnpmlcic?authuser=0&hl=en
 
 详细教程：[https://youtu.be/1y9ShTvgC_w](https://youtu.be/r_y_9ALr7fg)

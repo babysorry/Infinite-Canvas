@@ -4,19 +4,19 @@
 
 ### 方法一：双击运行（推荐）
 
-1. **首次使用**：右键点击 `mac-启动服务.command` → 选择 "打开" → 点击 "打开"（绕过安全警告）
-2. **之后使用**：直接双击 `mac-启动服务.command` 即可
+1. **首次使用**：右键点击 `mac-修复权限.command` → 选择“打开”。
+2. **启动服务**：双击 `mac-启动服务.command`。首次启动会自动创建独立 Python 环境并安装依赖。
 
 ### 方法二：终端运行
 
 ```bash
 cd 项目文件夹
-python3 main.py
+./mac-启动服务.sh
 ```
 
 ## 功能特点
 
-- **自动检测依赖**：首次运行会自动检查并安装所需依赖
+- **自动检测依赖**：首次运行会在 `.venv` 中自动检查并安装所需依赖
 - **自动打开浏览器**：服务启动后 3 秒自动打开网页
 - **显示访问地址**：同时显示本地地址和局域网地址
 
@@ -33,9 +33,10 @@ python3 main.py
 
 | 文件 | 说明 |
 |------|------|
-| `mac-启动服务.command` | 双击运行的启动器（自动修复权限、清理旧进程、启动服务） |
+| `mac-启动服务.command` | 双击运行的启动器（自动修复权限、检查依赖、启动服务） |
+| `mac-启动服务.sh` | 终端启动器（创建项目独立 Python 环境） |
 | `mac-修复权限.command` | 单独修复 macOS 安全限制 |
-| `main.py` | 服务主程序（直接 `python3 main.py` 即可启动） |
+| `main.py` | 服务主程序 |
 | `安装即梦CLI.command` | 安装/更新 dreamina CLI |
 | `登录即梦CLI.command` | 登录 dreamina CLI |
 
@@ -59,7 +60,7 @@ https://www.python.org/downloads/
 
 尝试手动安装依赖：
 ```bash
-pip3 install fastapi uvicorn httpx pillow requests pydantic python-dotenv websockets watchfiles
+./mac-安装依赖.sh
 ```
 
 ## 手动控制
@@ -71,7 +72,7 @@ pip3 install fastapi uvicorn httpx pillow requests pydantic python-dotenv websoc
 
 ### 启动服务
 ```bash
-python3 main.py
+./mac-启动服务.sh
 ```
 
 ## 访问服务

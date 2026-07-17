@@ -181,7 +181,6 @@ MODELSCOPE_TREE_URL = "https://www.modelscope.ai/api/v1/studio/daniel8152/Infini
 async def startup_event():
     global GLOBAL_LOOP
     GLOBAL_LOOP = asyncio.get_running_loop()
-    sync_static_html_versions()
     # 启动时整理资产库：给所有图片分组（含默认角色/场景）建好文件夹，并把根目录里的旧素材归整进去。
     try:
         await asyncio.to_thread(migrate_asset_library_into_dirs)
@@ -936,7 +935,8 @@ def merge_default_api_providers(providers, inject_missing=True):
         if current_protocol == "codex":
             image_models = [item for item in image_models if str(item or "").strip().lower() != "$imagegen"]
         current["image_models"] = model_list_from_values([*image_models, *default_image_models])
-        current["chat_models"] = model_list_from_values([*(current.get("chat_models") or []), *default_chat_models])
+        configured_chat_models = model_list_from_values(current.get("chat_models") or [])
+        current["chat_models"] = configured_chat_models or model_list_from_values(default_chat_models)
         current["video_models"] = []
         current["audio_models"] = []
     return merged
@@ -1184,6 +1184,16 @@ def normalize_endpoint_override(value, label):
         raise HTTPException(status_code=400, detail=f"{label} 需要以 /v1/... 开头，或填写完整 http(s) 地址")
     return endpoint
 
+def normalize_proxy_url(value, label="代理地址"):
+    proxy_url = str(value or "").strip().rstrip("/")
+    if not proxy_url:
+        return ""
+    if len(proxy_url) > 300 or re.search(r"\s", proxy_url):
+        raise HTTPException(status_code=400, detail=f"{label} 不合法")
+    if not re.match(r"^(?:https?|socks5h?)://", proxy_url, re.I):
+        raise HTTPException(status_code=400, detail=f"{label} 需要以 http://、https:// 或 socks5:// 开头")
+    return proxy_url
+
 def normalize_image_request_mode(value):
     mode = str(value or "").strip().lower()
     return mode if mode in SUPPORTED_IMAGE_REQUEST_MODES else "openai"
@@ -1276,6 +1286,7 @@ def normalize_provider(item):
     image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))
     image_generation_endpoint = normalize_endpoint_override(item.get("image_generation_endpoint"), "文生图端口")
     image_edit_endpoint = normalize_endpoint_override(item.get("image_edit_endpoint"), "图生图/编辑端口")
+    proxy_url = normalize_proxy_url(item.get("proxy_url"), f"{name} 的代理地址")
     volc_project = re.sub(r"\s+", " ", str(item.get("volcengine_project_name") or "").strip())[:80]
     volc_region = re.sub(r"\s+", " ", str(item.get("volcengine_region") or "").strip())[:40]
     if provider_id == "volcengine":
@@ -1342,6 +1353,7 @@ def normalize_provider(item):
         "image_request_mode": image_request_mode,
         "image_generation_endpoint": image_generation_endpoint,
         "image_edit_endpoint": image_edit_endpoint,
+        "proxy_url": proxy_url,
         "enabled": bool(item.get("enabled", True)),
         "primary": bool(item.get("primary", False)),
         "image_models": image_models,
@@ -1521,7 +1533,26 @@ os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(CONVERSATION_DIR, exist_ok=True)
 os.makedirs(CANVAS_DIR, exist_ok=True)
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class VersionedStaticFiles(StaticFiles):
+    """Serve HTML with current cache keys without rewriting tracked files."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code != 200 or not path.lower().endswith(".html"):
+            return response
+        full_path, _ = self.lookup_path(path)
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                html_text = f.read()
+        except (OSError, UnicodeError):
+            return response
+        return Response(
+            versioned_static_html(html_text),
+            media_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+app.mount("/static", VersionedStaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
@@ -2673,6 +2704,7 @@ class ApiProviderPayload(BaseModel):
     image_request_mode: str = "openai"
     image_generation_endpoint: str = ""
     image_edit_endpoint: str = ""
+    proxy_url: str = ""
     enabled: bool = True
     primary: bool = False
     image_models: List[str] = []
@@ -4487,6 +4519,69 @@ def is_gemini_cli_provider(provider):
 def codex_env_value(key):
     return os.getenv(key, "") or read_api_env_value(key)
 
+def codex_cli_proxy_settings():
+    """Resolve CLI proxy settings from explicit config, environment, or OS settings."""
+    configured = str(codex_env_value("CODEX_CLI_PROXY") or "").strip()
+    if configured:
+        return {"http": configured, "https": configured, "source": "configured"}
+    try:
+        provider_proxy = next(
+            (str(item.get("proxy_url") or "").strip() for item in load_api_providers() if is_codex_provider(item) and item.get("proxy_url")),
+            "",
+        )
+    except Exception:
+        provider_proxy = ""
+    if provider_proxy:
+        return {"http": provider_proxy, "https": provider_proxy, "source": "provider"}
+    env_proxies = {}
+    for scheme, keys in {
+        "http": ("HTTP_PROXY", "http_proxy"),
+        "https": ("HTTPS_PROXY", "https_proxy"),
+        "all": ("ALL_PROXY", "all_proxy"),
+        "no": ("NO_PROXY", "no_proxy"),
+    }.items():
+        value = next((str(os.getenv(key) or "").strip() for key in keys if os.getenv(key)), "")
+        if value:
+            env_proxies[scheme] = value
+    env_no_proxy = env_proxies.get("no") or ""
+    if any(env_proxies.get(key) for key in ("http", "https", "all")):
+        env_proxies["source"] = "environment"
+        return env_proxies
+    try:
+        system_proxies = {
+            str(key).lower(): str(value).strip()
+            for key, value in (urllib.request.getproxies() or {}).items()
+            if value
+        }
+    except Exception:
+        system_proxies = {}
+    if system_proxies.get("socks") and not system_proxies.get("all"):
+        system_proxies["all"] = system_proxies["socks"]
+    if env_no_proxy and not system_proxies.get("no"):
+        system_proxies["no"] = env_no_proxy
+    if any(system_proxies.get(key) for key in ("http", "https", "all")):
+        system_proxies["source"] = "system"
+    return system_proxies
+
+def codex_cli_subprocess_env():
+    env = os.environ.copy()
+    proxies = codex_cli_proxy_settings()
+    http_proxy = proxies.get("http") or proxies.get("https") or proxies.get("all") or ""
+    https_proxy = proxies.get("https") or proxies.get("http") or proxies.get("all") or ""
+    all_proxy = proxies.get("all") or ""
+    no_proxy = proxies.get("no") or ""
+    for key, value in (("HTTP_PROXY", http_proxy), ("http_proxy", http_proxy),
+                       ("HTTPS_PROXY", https_proxy), ("https_proxy", https_proxy),
+                       ("ALL_PROXY", all_proxy), ("all_proxy", all_proxy),
+                       ("NO_PROXY", no_proxy), ("no_proxy", no_proxy)):
+        if value and not env.get(key):
+            env[key] = value
+    return env
+
+def normalize_codex_image_quality(quality=""):
+    value = str(quality or "auto").strip().lower()
+    return value if value in {"auto", "low", "medium", "high"} else "auto"
+
 def codex_cli_executable():
     configured = str(codex_env_value("CODEX_BIN") or "").strip()
     if configured:
@@ -4511,7 +4606,7 @@ def codex_decode_output(stdout, stderr):
     err_text = (stderr or b"").decode("utf-8", errors="replace").strip()
     return out_text, err_text
 
-async def run_codex_cli(prompt, model="", image_paths=None, timeout=None, output_last_message=True):
+async def run_codex_cli(prompt, model="", image_paths=None, timeout=None, output_last_message=True, json_events=False):
     exe = codex_cli_executable()
     if not exe:
         raise HTTPException(status_code=400, detail="未找到 OpenAI Codex CLI。请先运行 CLI/windows/openai/install_openai_codex_cli.bat，并完成 codex 登录。")
@@ -4526,6 +4621,8 @@ async def run_codex_cli(prompt, model="", image_paths=None, timeout=None, output
         "workspace-write",
         "--skip-git-repo-check",
     ]
+    if json_events:
+        args.append("--json")
     exec_model = codex_model_for_exec(model)
     if exec_model:
         args.extend(["--model", exec_model])
@@ -4537,18 +4634,56 @@ async def run_codex_cli(prompt, model="", image_paths=None, timeout=None, output
         args.extend(["--output-last-message", last_path])
     args.append("-")
     prompt_bytes = str(prompt or "").encode("utf-8")
+    proc = None
+    communicate_task = None
+    def cleanup_last_message_file():
+        if last_path and os.path.exists(last_path):
+            try:
+                os.remove(last_path)
+            except Exception:
+                pass
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
             cwd=BASE_DIR,
+            env=codex_cli_subprocess_env(),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(input=prompt_bytes), timeout=timeout or codex_timeout())
+        communicate_task = asyncio.create_task(proc.communicate(input=prompt_bytes))
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=timeout or codex_timeout(),
+        )
     except asyncio.TimeoutError as exc:
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        if communicate_task:
+            try:
+                await asyncio.wait_for(communicate_task, timeout=5)
+            except Exception:
+                communicate_task.cancel()
+                await asyncio.gather(communicate_task, return_exceptions=True)
+        cleanup_last_message_file()
         raise HTTPException(status_code=504, detail="OpenAI Codex CLI 执行超时。可设置 CODEX_CLI_TIMEOUT 增大等待时间。") from exc
+    except asyncio.CancelledError:
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        if communicate_task:
+            communicate_task.cancel()
+            await asyncio.gather(communicate_task, return_exceptions=True)
+        cleanup_last_message_file()
+        raise
     except FileNotFoundError as exc:
+        cleanup_last_message_file()
         raise HTTPException(status_code=400, detail=f"未找到 OpenAI Codex CLI：{exe}") from exc
     out_text, err_text = codex_decode_output(stdout, stderr)
     last_text = ""
@@ -4558,10 +4693,7 @@ async def run_codex_cli(prompt, model="", image_paths=None, timeout=None, output
                 last_text = f.read().strip()
         except Exception:
             last_text = ""
-        try:
-            os.remove(last_path)
-        except Exception:
-            pass
+        cleanup_last_message_file()
     if proc.returncode != 0:
         message = err_text or out_text or last_text or f"exit={proc.returncode}"
         raise HTTPException(status_code=502, detail=f"OpenAI Codex CLI 调用失败：{message[:1200]}")
@@ -4875,7 +5007,7 @@ def codex_postprocess_image_to_requested_size(path="", requested_size="", provid
         print(f"{label} 图片尺寸后处理失败：{exc}")
         return ""
 
-async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, model, ref_paths=None):
+async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, quality, model, ref_paths=None):
     exe = gpt_image_2_skill_executable()
     if not exe:
         return None
@@ -4894,6 +5026,7 @@ async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, mode
         args = [
             exe,
             "--json",
+            "--json-events",
         ]
         args.extend(attempt_provider_args)
         args.extend([
@@ -4910,7 +5043,7 @@ async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, mode
             "--size",
             gpt_image_2_skill_size_arg(size, model, prompt, attempt_provider),
             "--quality",
-            "high",
+            normalize_codex_image_quality(quality),
         ])
         for path in ref_paths:
             args.extend(["--ref-image", path])
@@ -4920,6 +5053,7 @@ async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, mode
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 cwd=BASE_DIR,
+                env=codex_cli_subprocess_env(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -4963,6 +5097,7 @@ async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, mode
             "provider": "codex",
             "tool": "gpt-image-2-skill",
             "tool_provider": attempt_provider,
+            "quality": normalize_codex_image_quality(quality),
             "raw": parsed or {"stdout": out_text, "stderr": err_text},
         }
     raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 调用失败：{last_message[:1200]}")
@@ -5031,29 +5166,280 @@ async def codex_reference_paths(reference_images=None):
                 pass
         raise
 
-def codex_models_payload(raw=None):
-    all_models = [*CODEX_DEFAULT_IMAGE_MODELS, *CODEX_DEFAULT_CHAT_MODELS]
+async def codex_cli_model_catalog():
+    exe = codex_cli_executable()
+    if not exe:
+        return {"models": [], "model_names": {}, "source": "unavailable", "error": "未找到 OpenAI Codex CLI"}
+    errors = []
+    for bundled_only in (False, True):
+        args = [exe, "debug", "models"]
+        if bundled_only:
+            args.append("--bundled")
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=BASE_DIR,
+                env=codex_cli_subprocess_env(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except asyncio.TimeoutError:
+            if proc:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            errors.append("bundled: timeout" if bundled_only else "refreshed: timeout")
+            continue
+        except Exception as exc:
+            errors.append(f"{'bundled' if bundled_only else 'refreshed'}: {exc}")
+            continue
+        out_text, err_text = codex_decode_output(stdout, stderr)
+        if proc.returncode != 0:
+            errors.append(f"{'bundled' if bundled_only else 'refreshed'}: {(err_text or out_text or f'exit={proc.returncode}')[:300]}")
+            continue
+        try:
+            payload = json.loads(out_text or "{}")
+        except Exception as exc:
+            errors.append(f"{'bundled' if bundled_only else 'refreshed'}: invalid JSON ({exc})")
+            continue
+        entries = payload if isinstance(payload, list) else payload.get("models") if isinstance(payload, dict) else []
+        visible = []
+        names = {}
+        for item in entries or []:
+            if not isinstance(item, dict) or str(item.get("visibility") or "list").lower() == "hide":
+                continue
+            slug = str(item.get("slug") or item.get("id") or item.get("model") or "").strip()
+            if not slug or slug in visible:
+                continue
+            visible.append(slug)
+            display_name = str(item.get("display_name") or item.get("name") or "").strip()
+            if display_name and display_name != slug:
+                names[slug] = display_name
+        if visible:
+            return {
+                "models": visible,
+                "model_names": names,
+                "source": "bundled" if bundled_only else "refreshed",
+                "error": "；".join(errors)[:600],
+            }
+        errors.append(f"{'bundled' if bundled_only else 'refreshed'}: empty catalog")
+    return {"models": [], "model_names": {}, "source": "fallback", "error": "；".join(errors)[:600]}
+
+def codex_models_payload(raw=None, chat_models=None, model_names=None, catalog_source="fallback"):
+    chat_models = model_list_from_values(chat_models or CODEX_DEFAULT_CHAT_MODELS)
+    model_names = normalize_model_name_map(model_names or {})
+    all_models = [*CODEX_DEFAULT_IMAGE_MODELS, *chat_models]
     return {
         "ok": True,
         "protocol": "codex",
         "status": 200,
-        "message": "OpenAI Codex CLI 可用，模型列表来自本机 CLI 默认配置。",
+        "message": "OpenAI Codex CLI 可用，模型列表来自本机 CLI 模型目录。" if catalog_source == "refreshed" else "OpenAI Codex CLI 可用，模型列表来自 CLI 内置目录。" if catalog_source == "bundled" else "OpenAI Codex CLI 可用，模型目录读取失败，当前显示 IC 兜底模型。",
         "model_count": len(all_models),
         "total": len(all_models),
         "image_models": CODEX_DEFAULT_IMAGE_MODELS,
-        "chat_models": CODEX_DEFAULT_CHAT_MODELS,
+        "chat_models": chat_models,
         "video_models": [],
+        "model_names": model_names,
         "all": all_models,
         "raw": raw or {},
     }
 
-async def generate_codex_provider_image(prompt, size, model, reference_images=None, provider=None):
+def codex_feature_enabled(feature_text="", feature_name="image_generation"):
+    pattern = rf"^\s*{re.escape(feature_name)}\s+\S+\s+(true|false)\s*$"
+    match = re.search(pattern, str(feature_text or ""), flags=re.I | re.M)
+    return bool(match and match.group(1).lower() == "true")
+
+async def codex_native_image_generation_enabled(exe=""):
+    exe = exe or codex_cli_executable()
+    if not exe:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            exe,
+            "features",
+            "list",
+            cwd=BASE_DIR,
+            env=codex_cli_subprocess_env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        out_text, err_text = codex_decode_output(stdout, stderr)
+        return proc.returncode == 0 and codex_feature_enabled(f"{out_text}\n{err_text}")
+    except Exception:
+        return False
+
+def codex_native_image_roots():
+    codex_home = str(os.getenv("CODEX_HOME") or "").strip() or os.path.join(os.path.expanduser("~"), ".codex")
+    roots = [OUTPUT_OUTPUT_DIR, os.path.join(codex_home, "generated_images")]
+    return list(dict.fromkeys(os.path.abspath(path) for path in roots if path))
+
+def codex_jsonl_objects(text=""):
+    objects = []
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(item, dict):
+            objects.append(item)
+    return objects
+
+def codex_thread_id_from_events(stdout_text=""):
+    for item in codex_jsonl_objects(stdout_text):
+        if str(item.get("type") or "") == "thread.started":
+            thread_id = str(item.get("thread_id") or item.get("threadId") or "").strip()
+            if thread_id:
+                return thread_id
+    return ""
+
+def codex_session_file_for_thread(thread_id=""):
+    thread_id = str(thread_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", thread_id):
+        return ""
+    codex_home = str(os.getenv("CODEX_HOME") or "").strip() or os.path.join(os.path.expanduser("~"), ".codex")
+    pattern = os.path.join(codex_home, "sessions", "**", f"*{thread_id}.jsonl")
+    candidates = [path for path in glob.glob(pattern, recursive=True) if os.path.isfile(path)]
+    return max(candidates, key=os.path.getmtime) if candidates else ""
+
+def codex_image_generation_paths(raw=None):
+    raw = raw or {}
+    stdout_text = str(raw.get("_stdout") or "")
+    thread_id = codex_thread_id_from_events(stdout_text)
+    event_objects = codex_jsonl_objects(stdout_text)
+    session_file = codex_session_file_for_thread(thread_id)
+    if session_file:
+        try:
+            with open(session_file, "r", encoding="utf-8-sig") as f:
+                event_objects.extend(codex_jsonl_objects(f.read()))
+        except Exception:
+            pass
+    saved_paths = []
+    def collect(value):
+        if isinstance(value, dict):
+            if str(value.get("type") or "") == "image_generation_end" and str(value.get("status") or "").lower() == "completed":
+                path = str(value.get("saved_path") or "").strip()
+                if path:
+                    saved_paths.append(path)
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect(nested)
+    collect(event_objects)
+    if not thread_id:
+        return "", []
+    codex_home = str(os.getenv("CODEX_HOME") or "").strip() or os.path.join(os.path.expanduser("~"), ".codex")
+    thread_root = os.path.abspath(os.path.join(codex_home, "generated_images", thread_id))
+    verified = []
+    for path in dict.fromkeys(saved_paths):
+        absolute = os.path.abspath(path)
+        try:
+            in_thread = os.path.commonpath([thread_root, absolute]) == thread_root
+        except Exception:
+            in_thread = False
+        if in_thread and os.path.isfile(absolute):
+            verified.append(absolute)
+    return thread_id, verified
+
+def codex_recent_image_files(roots=None, since_time=0):
+    exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    files = []
+    for root in (roots or codex_native_image_roots()):
+        if not os.path.isdir(root):
+            continue
+        try:
+            for current_root, _dirs, names in os.walk(root):
+                for name in names:
+                    if os.path.splitext(name)[1].lower() not in exts:
+                        continue
+                    path = os.path.abspath(os.path.join(current_root, name))
+                    mtime = os.path.getmtime(path)
+                    if mtime + 1 >= float(since_time or 0):
+                        files.append((mtime, path))
+        except Exception:
+            continue
+    return [path for _mtime, path in sorted(files, reverse=True)]
+
+def codex_import_generated_image(path=""):
+    source = os.path.abspath(str(path or "").strip())
+    if not source or not os.path.isfile(source):
+        return ""
+    ext = os.path.splitext(source)[1].lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        return ""
+    existing_url = codex_output_url_from_path(source)
+    if existing_url:
+        return source
+    target = os.path.join(OUTPUT_OUTPUT_DIR, f"codex_native_{uuid.uuid4().hex}{ext}")
+    try:
+        shutil.copy2(source, target)
+        return target
+    except Exception:
+        return ""
+
+async def generate_codex_provider_image_via_native(prompt, size, quality, model, ref_paths=None):
+    quality_value = normalize_codex_image_quality(quality)
+    image_prompt = (
+        "$imagegen\n\n"
+        f"任务：{prompt}\n\n"
+        f"尺寸/比例参考：{size or 'auto'}。\n"
+        f"图片质量参数：{quality_value}；请保持该质量级别，不要自行改成其他级别。\n"
+        "请使用 Codex 原生 image_generation（$imagegen）生成或编辑图片。\n"
+        "只使用本次 image_generation 返回的图片；不要扫描 generated_images 目录，不要复制或复用其他会话、其他任务的图片。\n"
+        "如果本次工具没有返回 completed，请直接报告失败，不得用最近生成的文件替代。\n"
+        "只输出本次工具返回的最终文件路径和一句简短说明；不要修改项目代码，不要创建额外文档。"
+    )
+    raw = await run_codex_cli(
+        image_prompt,
+        model="",
+        image_paths=ref_paths,
+        timeout=codex_timeout(),
+        output_last_message=True,
+        json_events=True,
+    )
+    thread_id, candidates = codex_image_generation_paths(raw)
+    urls = []
+    for candidate in dict.fromkeys(candidates):
+        imported_path = codex_import_generated_image(candidate)
+        if not imported_path:
+            continue
+        processed_path = codex_postprocess_image_to_requested_size(imported_path, size, "codex")
+        url = codex_output_url_from_path(processed_path or imported_path)
+        if url and url not in urls:
+            urls.append(url)
+            break
+    if not urls:
+        status_text = (raw.get("text") or raw.get("_stdout") or raw.get("_stderr") or "")[:1200]
+        raise HTTPException(status_code=502, detail=f"OpenAI CLI 已返回，但当前会话没有 completed 的 image_generation_end 图片：{status_text}")
+    return {"type": "url", "value": urls[0]}, {
+        "images": urls,
+        "text": raw.get("text"),
+        "provider": "codex",
+        "tool": "codex-native-image_generation",
+        "thread_id": thread_id,
+        "quality": quality_value,
+        "raw": raw,
+    }
+
+def codex_image_channel():
+    # Third-party helpers can read Codex auth files. Keep IC on the official
+    # Codex CLI path even if an older environment still requests helper/auto.
+    return "native"
+
+async def generate_codex_provider_image(prompt, size, quality, model, reference_images=None, provider=None):
     ref_paths, temp_paths = await codex_reference_paths(reference_images)
     try:
-        skill_result = await generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, model, ref_paths)
-        if skill_result:
-            return skill_result
-        raise HTTPException(status_code=400, detail="未找到 GPT Image 2 helper，OpenAI CLI 生图已禁用 $imagegen 回退。请先安装 gpt-image-2-skill 后再生成图片。")
+        if not await codex_native_image_generation_enabled():
+            raise HTTPException(status_code=400, detail="Codex CLI 的 image_generation 功能未启用。请升级 CLI，并在 `codex features list` 中确认 image_generation 为 true。")
+        return await generate_codex_provider_image_via_native(prompt, size, quality, model, ref_paths)
     finally:
         for path in temp_paths:
             try:
@@ -10596,7 +10982,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     if provider["id"] == "modelscope":
         return await generate_modelscope_provider_image(prompt, size, model, reference_images, provider)
     if is_codex_provider(provider):
-        return await generate_codex_provider_image(prompt, size, model, reference_images, provider)
+        return await generate_codex_provider_image(prompt, size, quality, model, reference_images, provider)
     if is_gemini_cli_provider(provider):
         return await generate_gemini_cli_provider_image(prompt, size, model, reference_images, provider)
     if is_jimeng_provider(provider):
@@ -12271,12 +12657,19 @@ async def runninghub_upload_asset(payload: RunningHubUploadAssetRequest):
 async def codex_status():
     exe = codex_cli_executable()
     image2_exe = gpt_image_2_skill_executable()
+    proxy_settings = codex_cli_proxy_settings()
+    proxy_source = str(proxy_settings.get("source") or "")
     if not exe:
         return {
             "installed": False,
             "logged_in": False,
+            "image_generation_available": False,
+            "native_image_generation_enabled": False,
             "image2_helper_installed": bool(image2_exe),
             "image2_helper_path": image2_exe,
+            "image_channel": codex_image_channel(),
+            "proxy_detected": bool(proxy_source),
+            "proxy_source": proxy_source,
             "message": "未找到 OpenAI Codex CLI，请先安装。",
         }
     try:
@@ -12284,21 +12677,39 @@ async def codex_status():
             exe,
             "--version",
             cwd=BASE_DIR,
+            env=codex_cli_subprocess_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
         out_text, err_text = codex_decode_output(stdout, stderr)
         ok = proc.returncode == 0
-        helper_message = "GPT Image 2 helper 已安装，OpenAI CLI 生图会使用 GPT Image 2。" if image2_exe else "未找到 GPT Image 2 helper，OpenAI CLI 生图不可用；已禁用 Codex 内置 $imagegen 回退。"
+        native_enabled = await codex_native_image_generation_enabled(exe) if ok else False
+        selected_channel = codex_image_channel()
+        image_available = native_enabled
+        if native_enabled:
+            image_message = "原生 image_generation 已启用；当前只使用原生通道。"
+            if image2_exe:
+                image_message += "GPT Image 2 helper 已安装，但不会自动回退调用。"
+        elif image2_exe:
+            image_message = "原生 image_generation 未启用。GPT Image 2 helper 虽已安装，但不会自动回退调用。"
+        else:
+            image_message = "原生 image_generation 未启用，且未找到 GPT Image 2 helper，生图不可用。"
+        if proxy_source:
+            image_message += f"已继承{ {'configured': '显式', 'provider': '平台配置', 'environment': '环境变量', 'system': '系统'}.get(proxy_source, '') }代理设置。"
         return {
             "installed": ok,
             "logged_in": None,
             "version": out_text or err_text,
             "path": exe,
+            "image_generation_available": image_available,
+            "native_image_generation_enabled": native_enabled,
             "image2_helper_installed": bool(image2_exe),
             "image2_helper_path": image2_exe,
-            "message": f"OpenAI Codex CLI 已安装。{helper_message} 登录状态会在首次执行 codex exec 时由 CLI 校验。" if ok else (err_text or out_text or "Codex CLI 检测失败"),
+            "image_channel": selected_channel,
+            "proxy_detected": bool(proxy_source),
+            "proxy_source": proxy_source,
+            "message": f"OpenAI Codex CLI 已安装。{image_message}登录状态会在首次执行 codex exec 时由 CLI 校验。" if ok else (err_text or out_text or "Codex CLI 检测失败"),
             "raw": {"stdout": out_text, "stderr": err_text, "returncode": proc.returncode},
         }
     except Exception as exc:
@@ -12306,8 +12717,13 @@ async def codex_status():
             "installed": False,
             "logged_in": False,
             "path": exe,
+            "image_generation_available": False,
+            "native_image_generation_enabled": False,
             "image2_helper_installed": bool(image2_exe),
             "image2_helper_path": image2_exe,
+            "image_channel": codex_image_channel(),
+            "proxy_detected": bool(proxy_source),
+            "proxy_source": proxy_source,
             "message": f"Codex CLI 检测失败：{exc}",
         }
 
@@ -12943,11 +13359,18 @@ async def test_provider_connection(payload: TestConnectionPayload):
     protocol = protocol_from_payload(payload)
     if protocol == "codex":
         status = await codex_status()
-        payload_models = codex_models_payload(raw={"status": status})
+        catalog = await codex_cli_model_catalog()
+        payload_models = codex_models_payload(
+            raw={"status": status, "catalog": {"source": catalog.get("source"), "error": catalog.get("error")}},
+            chat_models=catalog.get("models"),
+            model_names=catalog.get("model_names"),
+            catalog_source=catalog.get("source"),
+        )
+        catalog_message = payload_models["message"]
         payload_models.update({
             "ok": bool(status.get("installed")),
             "status": 200 if status.get("installed") else 0,
-            "message": status.get("message") or ("OpenAI Codex CLI 可用" if status.get("installed") else "未找到 OpenAI Codex CLI"),
+            "message": f"{status.get('message') or ('OpenAI Codex CLI 可用' if status.get('installed') else '未找到 OpenAI Codex CLI')} {catalog_message}",
         })
         return payload_models
     if protocol == "gemini-cli":
@@ -13207,8 +13630,15 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
     protocol = protocol if protocol in SUPPORTED_PROVIDER_PROTOCOLS else "openai"
     if protocol == "codex":
         status = await codex_status()
-        payload = codex_models_payload(raw={"status": status})
-        payload["message"] = status.get("message") or payload["message"]
+        catalog = await codex_cli_model_catalog()
+        payload = codex_models_payload(
+            raw={"status": status, "catalog": {"source": catalog.get("source"), "error": catalog.get("error")}},
+            chat_models=catalog.get("models"),
+            model_names=catalog.get("model_names"),
+            catalog_source=catalog.get("source"),
+        )
+        if status.get("message"):
+            payload["message"] = f"{status['message']} {payload['message']}"
         return payload
     if protocol == "gemini-cli":
         status = await gemini_cli_status()
@@ -13559,9 +13989,15 @@ async def query_image_task(payload: ImageTaskQueryRequest):
     }
 
 async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
+    try:
+        task_provider = get_api_provider(payload.provider_id)
+        running_message = "Codex 原生 image_generation 正在生成" if is_codex_provider(task_provider) else "图片生成请求正在处理"
+    except Exception:
+        running_message = "图片生成请求正在处理"
     with CANVAS_TASK_LOCK:
         if task_id in CANVAS_TASKS:
             CANVAS_TASKS[task_id]["status"] = "running"
+            CANVAS_TASKS[task_id]["message"] = running_message
             CANVAS_TASKS[task_id]["updated_at"] = time.time()
     try:
         result = await build_online_image_result(payload)
@@ -13570,6 +14006,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
                 "status": "succeeded",
                 "result": result,
                 "error": "",
+                "message": "图片生成完成",
                 "updated_at": time.time(),
             })
     except JimengPendingError as exc:
@@ -13594,6 +14031,7 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
             CANVAS_TASKS[task_id].update({
                 "status": "failed",
                 "error": str(detail),
+                "message": "图片生成失败",
                 "status_code": status_code,
                 "upstream_task_id": upstream_task_id,
                 "updated_at": time.time(),
@@ -13607,6 +14045,7 @@ async def create_canvas_image_task(payload: OnlineImageRequest):
             "id": task_id,
             "type": "online-image",
             "status": "queued",
+            "message": "图片生成任务已排队",
             "created_at": time.time(),
             "updated_at": time.time(),
             "result": None,

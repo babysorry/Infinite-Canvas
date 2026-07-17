@@ -1,0 +1,26 @@
+# Python runtime
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+API/.env
+
+# User-generated assets and runtime state
+assets/input/
+assets/output/
+assets/library/
+data/api_providers.json
+data/asset_library.json
+data/canvases/
+data/conversations/
+data/media_previews/
+data/projects.json
+data/prompt_libraries.json
+data/update_backups/
+data/update_staging/
+history.json
+workflows/custom/

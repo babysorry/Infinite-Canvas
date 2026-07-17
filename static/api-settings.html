@@ -233,6 +233,11 @@
                                     </div>
                                     <div id="codexCliStatus" class="jimeng-status-pill">未检测</div>
                                 </div>
+                                <label class="field">
+                                    <div class="setting-title">CLI 代理（可选）</div>
+                                    <input id="codexProxyInput" class="setting-input" type="text" inputmode="url" autocomplete="off" placeholder="例如 http://127.0.0.1:7897">
+                                    <div class="rh-key-desc">留空时自动继承环境变量或系统代理；仅传给官方 Codex CLI。</div>
+                                </label>
                                 <div class="jimeng-actions">
                                     <button class="action-btn primary-btn" type="button" onclick="refreshCodexStatus()"><i data-lucide="radar" class="w-3.5 h-3.5"></i><span>检测 CLI</span></button>
                                     <button class="action-btn" type="button" onclick="openCodexHelp()"><i data-lucide="terminal" class="w-3.5 h-3.5"></i><span>帮助</span></button>
