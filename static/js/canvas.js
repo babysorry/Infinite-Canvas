@@ -1469,7 +1469,9 @@ async function saveCanvas(){
 async function loadConfig(){
     loadLocalModelLists();
     try {
-        const cfg = await fetch('/api/config').then(r=>r.json());
+        const cfgResponse = await fetch('/api/config', {cache:'no-store'});
+        if(!cfgResponse.ok) throw new Error(`加载 API 配置失败 (HTTP ${cfgResponse.status})`);
+        const cfg = await cfgResponse.json();
         imageModels = cfg.image_models?.length ? cfg.image_models : imageModels;
         chatModels = cfg.chat_models?.length ? cfg.chat_models : chatModels;
         videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;

@@ -1284,7 +1284,19 @@ def normalize_provider(item):
     if locked_rule:
         protocol = locked_rule["protocol"]
         image_request_mode = locked_rule["image_request_mode"]
+    image_models = model_list_from_values(item.get("image_models") or [])
+    chat_models = model_list_from_values(item.get("chat_models") or [])
     video_models = model_list_from_values(item.get("video_models") or [])
+    # 兼容旧版自动分类结果：Seedance 曾因关键词缺失被保存到聊天模型，
+    # 而画布只会从 video_models 读取视频平台与模型。
+    misplaced_seedance_models = [
+        model for model in chat_models
+        if "seedance" in str(model or "").lower()
+    ]
+    if misplaced_seedance_models:
+        misplaced = set(misplaced_seedance_models)
+        chat_models = [model for model in chat_models if model not in misplaced]
+        video_models = model_list_from_values([*video_models, *misplaced_seedance_models])
     if locked_rule and "video_models" in locked_rule:
         video_models = model_list_from_values(locked_rule.get("video_models") or [])
     return {
@@ -1297,8 +1309,8 @@ def normalize_provider(item):
         "image_edit_endpoint": image_edit_endpoint,
         "enabled": bool(item.get("enabled", True)),
         "primary": bool(item.get("primary", False)),
-        "image_models": model_list_from_values(item.get("image_models") or []),
-        "chat_models": model_list_from_values(item.get("chat_models") or []),
+        "image_models": image_models,
+        "chat_models": chat_models,
         "video_models": video_models,
         "model_names": normalize_model_name_map(item.get("model_names")),
         "model_protocols": normalize_model_protocols(item.get("model_protocols")),
@@ -12433,7 +12445,8 @@ async def jimeng_query_media(payload: JimengQueryMediaRequest):
         return {"status": "failed", "submit_id": submit_id, "kind": kind, "error": str(getattr(exc, "detail", "") or exc)}
 
 @app.get("/api/config")
-async def ai_config():
+async def ai_config(response: Response):
+    response.headers["Cache-Control"] = "no-store"
     preferred_chat_model = next((m for m in CHAT_MODELS if m == "gpt-5.5"), CHAT_MODELS[0] if CHAT_MODELS else CHAT_MODEL)
     providers = public_api_providers()
     return {
@@ -12718,7 +12731,7 @@ async def probe_volcengine_auto_detect(client, base_url: str, api_key: str):
 
 def classify_upstream_model(mid):
     lc = str(mid or "").lower()
-    video_keys = ["veo", "sora", "wan2", "wanx", "doubao-seedance", "doubao-1", "kling", "hailuo", "video", "t2v-", "i2v-", "s2v"]
+    video_keys = ["veo", "sora", "wan2", "wanx", "seedance", "doubao-seedance", "doubao-1", "kling", "hailuo", "video", "t2v-", "i2v-", "s2v"]
     if any(k in lc for k in video_keys):
         return "video"
     image_keys = ["banana", "image", "dalle", "dall-e", "imagen", "flux", "stable", "sdxl", "midjourney", "nano-banana", "ideogram", "fal-ai", "z-image", "qwen-image", "klein", "seedream", "doubao-seedream", "text-to-image", "image-to-image"]
@@ -14073,6 +14086,144 @@ def volcengine_video_prompt_text(prompt, aspect_ratio="", duration=None):
     suffix_text = " ".join(suffixes)
     return f"{text} {suffix_text}".strip() if text else suffix_text
 
+def is_local_fal_video_model(provider, model):
+    model_id = str(model or "").strip().lower()
+    if "grok-imagine-video" not in model_id and "seedance" not in model_id:
+        return False
+    provider_marker = " ".join([
+        str((provider or {}).get("id") or ""),
+        str((provider or {}).get("name") or ""),
+    ]).lower()
+    try:
+        hostname = (urllib.parse.urlparse(str((provider or {}).get("base_url") or "")).hostname or "").lower()
+    except Exception:
+        hostname = ""
+    return (
+        "fal" in provider_marker
+        or "lfp" in provider_marker
+        or hostname in {"127.0.0.1", "localhost", "::1"}
+    )
+
+def openai_compatible_video_body(payload, provider):
+    model = selected_model(payload.model, "veo3-fast")
+    model_id = str(model or "").strip().lower()
+    is_local_fal_video = is_local_fal_video_model(provider, model)
+    is_grok_reference = is_local_fal_video and model_id == "grok-imagine-video-reference"
+    source_images = [ref for ref in payload.images if ref.url]
+    if is_grok_reference and len(source_images) > 7:
+        raise HTTPException(
+            status_code=400,
+            detail="grok-imagine-video-reference 最多支持 7 张参考图。",
+        )
+    converted_images = []
+    image_limit = 7 if is_grok_reference else 4
+    for ref in source_images[:image_limit]:
+        if ref.url:
+            ref_data = ref.model_dump() if hasattr(ref, "model_dump") else ref.dict()
+            converted_url = reference_to_data_url(ref_data, max_size=1536)
+            if converted_url:
+                converted_images.append({
+                    "url": converted_url,
+                    "role": str(ref.role or "").strip().lower(),
+                })
+    image_payload = [item["url"] for item in converted_images]
+    body = {
+        "prompt": payload.prompt,
+        "model": model,
+        "duration": payload.duration,
+        "watermark": payload.watermark,
+    }
+    if payload.aspect_ratio:
+        body["aspect_ratio"] = payload.aspect_ratio
+        body["ratio"] = payload.aspect_ratio
+    if payload.size:
+        body["size"] = payload.size
+    if payload.resolution:
+        body["resolution"] = payload.resolution
+    if image_payload:
+        # 保留 Infinite-Canvas 既有的通用复数格式；本地 Fal 代理的 Grok/Seedance
+        # 以单数 image_url 判断 image-to-video，否则会错误路由到 text-to-video。
+        body["images"] = image_payload
+        if is_local_fal_video:
+            first_frames = [
+                item for item in converted_images
+                if item["role"] in {"first", "first_frame"}
+            ]
+            last_frames = [
+                item for item in converted_images
+                if item["role"] in {"last", "last_frame"}
+            ]
+            if is_grok_reference:
+                if first_frames or last_frames:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="grok-imagine-video-reference 是多图参考模型，不支持首尾帧角色；请关闭「首尾帧」。",
+                    )
+                body["reference_image_urls"] = image_payload
+            elif payload.multimodal:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{model} 当前不支持全能/多图参考，请改用 grok-imagine-video-reference。",
+                )
+            elif len(first_frames) > 1 or len(last_frames) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="首尾帧各只能设置一张图片。",
+                )
+            elif model_id == "grok-imagine-video":
+                if last_frames:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="grok-imagine-video 仅支持单张首帧，不支持尾帧。请关闭「首尾帧」或改用 seedance-2.0-mini。",
+                    )
+                if len(converted_images) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="grok-imagine-video 仅支持单张参考图；多图参考请改用 grok-imagine-video-reference。",
+                    )
+                body["image_url"] = (first_frames[0] if first_frames else converted_images[0])["url"]
+            else:
+                if last_frames:
+                    if not first_frames:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="seedance-2.0-mini 使用尾帧时必须同时设置首帧。",
+                        )
+                    if len(converted_images) != 2:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="seedance-2.0-mini 首尾帧模式只支持一张首帧和一张尾帧。",
+                        )
+                    body["image_url"] = first_frames[0]["url"]
+                    body["end_image_url"] = last_frames[0]["url"]
+                elif len(converted_images) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="seedance-2.0-mini 不支持多图参考；两张图片请开启「首尾帧」，多图参考请改用 grok-imagine-video-reference。",
+                    )
+                else:
+                    body["image_url"] = (first_frames[0] if first_frames else converted_images[0])["url"]
+    elif is_grok_reference:
+        raise HTTPException(
+            status_code=400,
+            detail="grok-imagine-video-reference 至少需要 1 张参考图。",
+        )
+    if payload.videos:
+        body["videos"] = [v for v in payload.videos if v]
+    if payload.enhance_prompt:
+        body["enhance_prompt"] = True
+    if payload.enable_upsample:
+        body["enable_upsample"] = True
+    if payload.seed is not None:
+        body["seed"] = payload.seed
+    if payload.camerafixed:
+        body["camerafixed"] = True
+    if payload.return_last_frame:
+        body["return_last_frame"] = True
+    if payload.generate_audio:
+        body["generate_audio"] = True
+    return body
+
 @app.post("/api/canvas-video")
 async def canvas_video(payload: CanvasVideoRequest):
     provider = get_api_provider(payload.provider_id)
@@ -14387,39 +14538,7 @@ async def canvas_video(payload: CanvasVideoRequest):
                     if payload.enable_upsample:
                         body["enable_upsample"] = True
                 else:
-                    image_payload = []
-                    for ref in payload.images[:4]:
-                        if ref.url:
-                            image_payload.append(reference_to_data_url(ref.dict(), max_size=1536))
-                    body = {
-                        "prompt": payload.prompt,
-                        "model": selected_model(payload.model, "veo3-fast"),
-                        "duration": payload.duration,
-                        "watermark": payload.watermark,
-                    }
-                    if payload.aspect_ratio:
-                        body["aspect_ratio"] = payload.aspect_ratio
-                        body["ratio"] = payload.aspect_ratio
-                    if payload.size:
-                        body["size"] = payload.size
-                    if payload.resolution:
-                        body["resolution"] = payload.resolution
-                    if image_payload:
-                        body["images"] = image_payload
-                    if payload.videos:
-                        body["videos"] = [v for v in payload.videos if v]
-                    if payload.enhance_prompt:
-                        body["enhance_prompt"] = True
-                    if payload.enable_upsample:
-                        body["enable_upsample"] = True
-                    if payload.seed is not None:
-                        body["seed"] = payload.seed
-                    if payload.camerafixed:
-                        body["camerafixed"] = True
-                    if payload.return_last_frame:
-                        body["return_last_frame"] = True
-                    if payload.generate_audio:
-                        body["generate_audio"] = True
+                    body = openai_compatible_video_body(payload, provider)
             # --- 发起视频生成请求 ---
             raw = None
             html_response = None
