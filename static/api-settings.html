@@ -19,9 +19,9 @@
     <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.07.15.1782696751"></script>
     <script src="/static/vendor/js/lucide.js?v=2026.07.15.1782696749"></script>
     <script src="/static/js/theme.js?v=2026.07.15.1783117645"></script>
-    <script src="/static/js/i18n.js?v=2026.07.15.1783116068"></script>
+    <script src="/static/js/i18n.js?v=2026.07.17.1"></script>
     <link rel="stylesheet" href="/static/css/theme.css?v=2026.07.15.1782696682">
-    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.07.15.1783956643">
+    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.07.17.1">
 </head>
 <body>
     <div class="page">
@@ -319,7 +319,7 @@
                     <div id="modelsHead" class="block models-toolbar">
                         <div>
                             <div class="block-title" data-i18n="api.modelsTitle">模型列表</div>
-                            <div class="block-desc" data-i18n="api.modelsDesc">从上游 API 自动拉取所有可用模型并按类型分类（image / chat / video）</div>
+                            <div class="block-desc" data-i18n="api.modelsDesc">从上游 API 自动拉取所有可用模型并按类型分类（image / chat / video / audio）</div>
                         </div>
                         <div class="models-toolbar-actions">
                             <button id="fetchModelsBtn" class="action-btn primary-btn" type="button" onclick="fetchModels()">
@@ -365,6 +365,21 @@
                                 <button class="ghost-btn" type="button" onclick="addModel('video')"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span data-i18n="api.model">模型</span></button>
                             </div>
                             <div id="videoModelList" class="model-list"></div>
+                        </section>
+
+                        <section class="block">
+                            <div class="block-head">
+                                <div>
+                                    <div class="block-title" data-i18n="api.audioModels">音频模型</div>
+                                    <div class="block-desc" data-i18n="api.audioHint">无限画布音频生成节点使用</div>
+                                </div>
+                                <button class="ghost-btn" type="button" onclick="addModel('audio')"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span data-i18n="api.model">模型</span></button>
+                            </div>
+                            <label class="field full audio-default-field">
+                                <span class="label" data-i18n="api.defaultAudioModel">默认音频模型</span>
+                                <div class="field-frame"><select id="defaultAudioModelSelect" onchange="updateDefaultAudioModel(this.value)"></select></div>
+                            </label>
+                            <div id="audioModelList" class="model-list"></div>
                         </section>
 
                         <section id="msLoraBlock" class="block ms-lora-block">
@@ -427,6 +442,7 @@
                     <button class="picker-cat-tab" data-cat="image" onclick="selectPickerCat('image')">生图 <span class="cat-count">0</span></button>
                     <button class="picker-cat-tab" data-cat="chat" onclick="selectPickerCat('chat')">LLM <span class="cat-count">0</span></button>
                     <button class="picker-cat-tab" data-cat="video" onclick="selectPickerCat('video')">视频 <span class="cat-count">0</span></button>
+                    <button class="picker-cat-tab" data-cat="audio" onclick="selectPickerCat('audio')">音频 <span class="cat-count">0</span></button>
                 </div>
             </div>
             <div id="pickerList" class="picker-body"></div>
@@ -435,6 +451,7 @@
                 <span id="sumImage" class="picker-sum-chip picker-sum-chip-empty">生图 0</span>
                 <span id="sumChat" class="picker-sum-chip picker-sum-chip-empty">聊天 0</span>
                 <span id="sumVideo" class="picker-sum-chip picker-sum-chip-empty">视频 0</span>
+                <span id="sumAudio" class="picker-sum-chip picker-sum-chip-empty">音频 0</span>
                 <span id="sumUnsel" style="margin-left:auto;color:var(--faint)">未选 0</span>
             </div>
             <div class="picker-foot">
@@ -565,6 +582,6 @@
         </div>
     </div>
 
-    <script src="/static/js/api-settings.js?v=2026.07.15.1784268525"></script>
+    <script src="/static/js/api-settings.js?v=2026.07.17.1"></script>
 </body>
 </html>

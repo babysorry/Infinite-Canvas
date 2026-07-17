@@ -797,6 +797,9 @@ def default_api_providers():
             "image_models": MODELSCOPE_DEFAULT_IMAGE_MODELS,
             "chat_models": MODELSCOPE_CHAT_MODELS,
             "video_models": [],
+            "audio_models": [],
+            "default_audio_model": "",
+            "model_metadata": {},
             "ms_loras": MODELSCOPE_DEFAULT_LORAS,
             "ms_defaults_version": MODELSCOPE_DEFAULTS_VERSION,
         },
@@ -813,6 +816,9 @@ def default_api_providers():
             "image_models": [],
             "chat_models": [],
             "video_models": [],
+            "audio_models": [],
+            "default_audio_model": "",
+            "model_metadata": {},
             "ms_loras": [],
             "ms_defaults_version": 0,
             "rh_apps": RUNNINGHUB_DEFAULT_APPS,
@@ -831,6 +837,9 @@ def default_api_providers():
             "image_models": [],
             "chat_models": [],
             "video_models": [],
+            "audio_models": [],
+            "default_audio_model": "",
+            "model_metadata": {},
             "ms_loras": [],
             "ms_defaults_version": 0,
             "volcengine_project_name": VOLCENGINE_DEFAULT_PROJECT_NAME,
@@ -873,6 +882,7 @@ def merge_default_api_providers(providers, inject_missing=True):
             current["image_models"] = model_list_from_values(current.get("image_models") or [])
             current["chat_models"] = model_list_from_values(current.get("chat_models") or [])
             current["video_models"] = model_list_from_values(current.get("video_models") or [])
+            current["audio_models"] = model_list_from_values(current.get("audio_models") or [])
             current["rh_apps"] = merge_runninghub_system_entries(rh_default.get("rh_apps") or [], current.get("rh_apps") or [], "app")
             current["rh_workflows"] = merge_runninghub_system_entries(rh_default.get("rh_workflows") or [], current.get("rh_workflows") or [], "workflow")
     volc_default = next((d for d in default_api_providers() if d["id"] == "volcengine"), None)
@@ -928,6 +938,7 @@ def merge_default_api_providers(providers, inject_missing=True):
         current["image_models"] = model_list_from_values([*image_models, *default_image_models])
         current["chat_models"] = model_list_from_values([*(current.get("chat_models") or []), *default_chat_models])
         current["video_models"] = []
+        current["audio_models"] = []
     return merged
 
 def normalize_model_list(values):
@@ -1287,6 +1298,7 @@ def normalize_provider(item):
     image_models = model_list_from_values(item.get("image_models") or [])
     chat_models = model_list_from_values(item.get("chat_models") or [])
     video_models = model_list_from_values(item.get("video_models") or [])
+    audio_models = model_list_from_values(item.get("audio_models") or [])
     # 兼容旧版自动分类结果：Seedance 曾因关键词缺失被保存到聊天模型，
     # 而画布只会从 video_models 读取视频平台与模型。
     misplaced_seedance_models = [
@@ -1312,7 +1324,14 @@ def normalize_provider(item):
         "image_models": image_models,
         "chat_models": chat_models,
         "video_models": video_models,
+        "audio_models": audio_models,
+        "default_audio_model": (
+            str(item.get("default_audio_model") or "").strip()
+            if str(item.get("default_audio_model") or "").strip() in audio_models
+            else (audio_models[0] if audio_models else "")
+        ),
         "model_names": normalize_model_name_map(item.get("model_names")),
+        "model_metadata": normalize_model_metadata_map(item.get("model_metadata")),
         "model_protocols": normalize_model_protocols(item.get("model_protocols")),
         "ms_loras": normalize_ms_loras(item.get("ms_loras") or []),
         "ms_defaults_version": int(item.get("ms_defaults_version") or 0),
@@ -2518,6 +2537,8 @@ class ImageTaskQueryRequest(BaseModel):
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
+CANVAS_AUDIO_TASKS: Dict[str, Dict[str, Any]] = {}
+CANVAS_AUDIO_TASK_LOCK = Lock()
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
@@ -2539,6 +2560,23 @@ class CanvasVideoRequest(BaseModel):
     generate_audio: bool = False
     multimodal: bool = False
     trusted_asset: bool = False
+
+class CanvasAudioDialogueInput(BaseModel):
+    voice: str = ""
+    text: str = ""
+
+class CanvasAudioRequest(BaseModel):
+    provider_id: str = "comfly"
+    model: str = ""
+    prompt: str = ""
+    voice: str = ""
+    inputs: List[CanvasAudioDialogueInput] = []
+    language_boost: str = ""
+    language_code: str = ""
+    speed: float = 1.0
+    format: str = "mp3"
+    stability: Optional[float] = None
+    use_speaker_boost: Optional[bool] = None
 
 class TempShUploadRequest(BaseModel):
     url: str = ""
@@ -2617,7 +2655,10 @@ class ApiProviderPayload(BaseModel):
     image_models: List[str] = []
     chat_models: List[str] = []
     video_models: List[str] = []
+    audio_models: List[str] = []
+    default_audio_model: str = ""
     model_names: Dict[str, str] = {}
+    model_metadata: Dict[str, Dict[str, Any]] = {}
     model_protocols: Dict[str, str] = {}
     ms_loras: List[Dict[str, Any]] = []
     ms_defaults_version: int = 0
@@ -4323,6 +4364,42 @@ def normalize_model_name_map(value):
             label = re.sub(r"\s+", " ", str(raw_label or "").strip())[:160]
             if model and label and label != model:
                 normalized[model] = label
+    return normalized
+
+MODEL_CATEGORIES = {"image", "video", "audio", "chat"}
+
+def normalize_model_metadata_map(value):
+    """Normalize per-model display metadata while preserving an explicit user note override."""
+    normalized = {}
+    if not isinstance(value, dict):
+        return normalized
+    for raw_id, raw in value.items():
+        if not isinstance(raw, dict):
+            continue
+        model_id = str(raw.get("id") or raw_id or "").strip()
+        if not model_id:
+            continue
+        category = str(raw.get("category") or "").strip().lower()
+        item = {
+            "id": model_id,
+            "display_name": re.sub(r"\s+", " ", str(raw.get("display_name") or "").strip())[:160],
+            "description": re.sub(r"\s+", " ", str(raw.get("description") or "").strip())[:1000],
+            "description_override": re.sub(r"\s+", " ", str(raw.get("description_override") or "").strip())[:1000],
+            "category": category if category in MODEL_CATEGORIES else "",
+            "input_modalities": [
+                str(entry).strip() for entry in (raw.get("input_modalities") or [])
+                if str(entry).strip()
+            ][:20],
+            "output_modalities": [
+                str(entry).strip() for entry in (raw.get("output_modalities") or [])
+                if str(entry).strip()
+            ][:20],
+            "capabilities": [
+                str(entry).strip() for entry in (raw.get("capabilities") or [])
+                if str(entry).strip()
+            ][:40],
+        }
+        normalized[model_id] = item
     return normalized
 
 def effective_protocol(provider, model=""):
@@ -12456,6 +12533,11 @@ async def ai_config(response: Response):
         "chat_models": CHAT_MODELS,
         "image_models": IMAGE_MODELS,
         "video_models": VIDEO_MODELS,
+        "audio_models": sorted({
+            model
+            for provider in providers
+            for model in (provider.get("audio_models") or [])
+        }),
         "comfy_instances": COMFYUI_INSTANCES,
         "api_providers": providers,
         "has_api_key": bool(AI_API_KEY),
@@ -12465,7 +12547,17 @@ async def ai_config(response: Response):
 
 @app.get("/api/models")
 async def ai_models():
-    return {"chat_models": CHAT_MODELS, "image_models": IMAGE_MODELS, "video_models": VIDEO_MODELS}
+    providers = public_api_providers()
+    return {
+        "chat_models": CHAT_MODELS,
+        "image_models": IMAGE_MODELS,
+        "video_models": VIDEO_MODELS,
+        "audio_models": sorted({
+            model
+            for provider in providers
+            for model in (provider.get("audio_models") or [])
+        }),
+    }
 
 @app.get("/api/providers")
 async def api_providers():
@@ -12616,6 +12708,8 @@ def volcengine_default_model_payload(status=200, message="", raw=None):
         "image_models": [],
         "chat_models": [],
         "video_models": [],
+        "audio_models": [],
+        "model_metadata": {},
         "all": [],
         "raw": raw,
     }
@@ -12702,6 +12796,8 @@ async def probe_openai_models_endpoint(client, base_url: str, api_key: str):
             "image_models": grouped["image"],
             "chat_models": grouped["chat"],
             "video_models": grouped["video"],
+            "audio_models": grouped["audio"],
+            "model_metadata": upstream_model_metadata(raw, "openai"),
             "all": ids,
         }
     if 400 <= response.status_code < 500:
@@ -12731,6 +12827,9 @@ async def probe_volcengine_auto_detect(client, base_url: str, api_key: str):
 
 def classify_upstream_model(mid):
     lc = str(mid or "").lower()
+    audio_keys = ["audio", "speech", "tts", "eleven", "voice", "text-to-speech", "minimax-speech"]
+    if any(k in lc for k in audio_keys):
+        return "audio"
     video_keys = ["veo", "sora", "wan2", "wanx", "seedance", "doubao-seedance", "doubao-1", "kling", "hailuo", "video", "t2v-", "i2v-", "s2v"]
     if any(k in lc for k in video_keys):
         return "video"
@@ -12739,12 +12838,47 @@ def classify_upstream_model(mid):
         return "image"
     return "chat"
 
-def parse_upstream_models(raw, protocol="openai"):
+def upstream_model_items(raw):
     items = raw.get("data") if isinstance(raw, dict) else None
     if not items and isinstance(raw, dict):
         items = raw.get("models") or raw.get("list") or []
     if not isinstance(items, list):
         items = []
+    return items
+
+def upstream_model_metadata(raw, protocol="openai"):
+    metadata = {}
+    for value in upstream_model_items(raw):
+        if isinstance(value, str):
+            model_id = value
+            item = {}
+        elif isinstance(value, dict):
+            item = value
+            model_id = item.get("id") or item.get("name") or item.get("model")
+        else:
+            continue
+        model_id = str(model_id or "").strip()
+        if protocol == "gemini" and model_id.startswith("models/"):
+            model_id = model_id[len("models/"):]
+        if not model_id:
+            continue
+        category = str(item.get("category") or "").strip().lower()
+        if category not in MODEL_CATEGORIES:
+            category = classify_upstream_model(model_id)
+        metadata[model_id] = {
+            "id": model_id,
+            "display_name": str(item.get("display_name") or item.get("displayName") or "").strip(),
+            "description": str(item.get("description") or "").strip(),
+            "description_override": "",
+            "category": category,
+            "input_modalities": list(item.get("input_modalities") or []),
+            "output_modalities": list(item.get("output_modalities") or []),
+            "capabilities": list(item.get("capabilities") or []),
+        }
+    return normalize_model_metadata_map(metadata)
+
+def parse_upstream_models(raw, protocol="openai"):
+    items = upstream_model_items(raw)
     ids = []
     for it in items:
         if isinstance(it, str):
@@ -12759,9 +12893,11 @@ def parse_upstream_models(raw, protocol="openai"):
                 mid = mid[len("models/"):]
             ids.append(mid)
     ids = sorted(set(ids))
-    grouped = {"image": [], "chat": [], "video": []}
+    metadata = upstream_model_metadata(raw, protocol)
+    grouped = {"image": [], "chat": [], "video": [], "audio": []}
     for mid in ids:
-        grouped[classify_upstream_model(mid)].append(mid)
+        category = str((metadata.get(mid) or {}).get("category") or "").lower()
+        grouped[category if category in grouped else classify_upstream_model(mid)].append(mid)
     return grouped, ids
 
 def apply_agnes_model_defaults(base_url, grouped, ids):
@@ -12810,6 +12946,8 @@ async def test_provider_connection(payload: TestConnectionPayload):
             "image_models": JIMENG_DEFAULT_IMAGE_MODELS,
             "chat_models": [],
             "video_models": JIMENG_DEFAULT_VIDEO_MODELS,
+            "audio_models": [],
+            "model_metadata": {},
             "all": [*JIMENG_DEFAULT_IMAGE_MODELS, *JIMENG_DEFAULT_VIDEO_MODELS],
             "raw": status.get("raw"),
         }
@@ -12824,6 +12962,8 @@ async def test_provider_connection(payload: TestConnectionPayload):
             "image_models": payload_models["image_models"],
             "chat_models": payload_models["chat_models"],
             "video_models": payload_models["video_models"],
+            "audio_models": payload_models.get("audio_models") or [],
+            "model_metadata": payload_models.get("model_metadata") or {},
             "all": payload_models["all"],
             "protocol": "runninghub",
             "raw": payload_models.get("raw"),
@@ -12876,6 +13016,8 @@ async def test_provider_connection(payload: TestConnectionPayload):
                 "image_models": grouped["image"],
                 "chat_models": grouped["chat"],
                 "video_models": grouped["video"],
+                "audio_models": grouped["audio"],
+                "model_metadata": upstream_model_metadata(data, protocol),
                 "all": ids,
                 "image_request_mode": detect_image_request_mode(base_url, ids) or normalize_image_request_mode(getattr(payload, "image_request_mode", "")),
             }
@@ -13056,6 +13198,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
             "image_models": JIMENG_DEFAULT_IMAGE_MODELS,
             "chat_models": [],
             "video_models": JIMENG_DEFAULT_VIDEO_MODELS,
+            "audio_models": [],
+            "model_metadata": {},
             "all": [*JIMENG_DEFAULT_IMAGE_MODELS, *JIMENG_DEFAULT_VIDEO_MODELS],
         }
     if protocol == "runninghub":
@@ -13096,6 +13240,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
                             "image_models": payload["image_models"],
                             "chat_models": payload["chat_models"],
                             "video_models": payload["video_models"],
+                            "audio_models": payload.get("audio_models") or [],
+                            "model_metadata": payload.get("model_metadata") or {},
                             "all": payload["all"],
                             "message": payload["message"],
                             "raw": payload["raw"],
@@ -13114,6 +13260,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
                             "image_models": payload["image_models"],
                             "chat_models": payload["chat_models"],
                             "video_models": payload["video_models"],
+                            "audio_models": payload.get("audio_models") or [],
+                            "model_metadata": payload.get("model_metadata") or {},
                             "all": payload["all"],
                             "message": payload["message"],
                             "raw": payload["raw"],
@@ -13137,6 +13285,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
                             "image_models": payload["image_models"],
                             "chat_models": payload["chat_models"],
                             "video_models": payload["video_models"],
+                            "audio_models": payload.get("audio_models") or [],
+                            "model_metadata": payload.get("model_metadata") or {},
                             "all": payload["all"],
                             "message": payload["message"],
                             "raw": payload["raw"],
@@ -13154,6 +13304,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
             "image_models": payload["image_models"],
             "chat_models": payload["chat_models"],
             "video_models": payload["video_models"],
+            "audio_models": payload.get("audio_models") or [],
+            "model_metadata": payload.get("model_metadata") or {},
             "all": payload["all"],
             "message": payload["message"],
             "raw": payload["raw"],
@@ -13163,6 +13315,8 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
         "image_models": grouped["image"],
         "chat_models": grouped["chat"],
         "video_models": grouped["video"],
+        "audio_models": grouped["audio"],
+        "model_metadata": upstream_model_metadata(raw, protocol),
         "all": ids,
         "image_request_mode": detect_image_request_mode(base_url, ids) or normalize_image_request_mode(image_request_mode),
     }
@@ -14223,6 +14377,192 @@ def openai_compatible_video_body(payload, provider):
     if payload.generate_audio:
         body["generate_audio"] = True
     return body
+
+def canvas_audio_request_body(payload: CanvasAudioRequest):
+    model = str(payload.model or "").strip()
+    prompt = str(payload.prompt or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="请先选择音频模型")
+    if model == "eleven-v3-dialogue":
+        dialogue = [
+            {"voice": str(item.voice or "").strip(), "text": str(item.text or "").strip()}
+            for item in (payload.inputs or [])
+            if str(item.text or "").strip()
+        ]
+        if dialogue:
+            body = {"model": model, "inputs": dialogue}
+            language_code = str(payload.language_code or "").strip()
+            if language_code:
+                body["language_code"] = language_code
+            if payload.stability is not None:
+                body["stability"] = max(0.0, min(1.0, float(payload.stability)))
+            if payload.use_speaker_boost is not None:
+                body["use_speaker_boost"] = bool(payload.use_speaker_boost)
+            return body
+        if not prompt:
+            raise HTTPException(status_code=400, detail="请输入单角色台词或至少一条角色对白")
+        return {
+            "model": model,
+            "prompt": prompt,
+            "voice": str(payload.voice or "Aria").strip() or "Aria",
+        }
+    if not prompt:
+        raise HTTPException(status_code=400, detail="请输入要生成的旁白或配音文本")
+    return {
+        "model": model,
+        "prompt": prompt,
+        "language_boost": str(payload.language_boost or "").strip() or "Chinese",
+        "voice_setting": {
+            "voice_id": str(payload.voice or "Chinese (Mandarin)_Warm_Bestie").strip()
+                or "Chinese (Mandarin)_Warm_Bestie",
+            "speed": max(0.5, min(2.0, float(payload.speed or 1.0))),
+        },
+        "audio_setting": {
+            "format": str(payload.format or "mp3").strip().lower() or "mp3",
+        },
+    }
+
+def canvas_audio_generations_url(provider, task_id=""):
+    base_url = str((provider or {}).get("base_url") or "").strip().rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="音频 Provider 未配置 Base URL")
+    root = f"{base_url}/audio/generations" if base_url.endswith("/v1") else f"{base_url}/v1/audio/generations"
+    return f"{root}/{urllib.parse.quote(str(task_id), safe='')}" if task_id else root
+
+def upstream_error_message(response, fallback):
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict) and error.get("message"):
+        return str(error["message"])
+    if isinstance(data, dict) and data.get("detail"):
+        return str(data["detail"])
+    return (response.text or fallback)[:1000]
+
+def normalize_canvas_audio_result(raw, provider=None):
+    raw = raw if isinstance(raw, dict) else {}
+    audio = raw.get("audio") if isinstance(raw.get("audio"), dict) else {}
+    url = str(audio.get("url") or raw.get("url") or "").strip()
+    if url and not re.match(r"^https?://", url, re.I):
+        base_url = str((provider or {}).get("base_url") or "").rstrip("/") + "/"
+        url = urllib.parse.urljoin(base_url, url)
+    content_type = str(audio.get("content_type") or audio.get("mime_type") or "audio/mpeg").strip()
+    path_name = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]) if url else ""
+    file_name = str(audio.get("file_name") or audio.get("filename") or path_name or "generated-audio.mp3").strip()
+    item = {
+        "url": url,
+        "kind": "audio",
+        "name": file_name,
+        "mime": content_type,
+        "content_type": content_type,
+    }
+    result = {
+        "id": str(raw.get("id") or "").strip(),
+        "task_id": str(raw.get("id") or "").strip(),
+        "status": str(raw.get("status") or "").strip().lower(),
+        "model": str(raw.get("model") or "").strip(),
+        "audio": item if url else None,
+        "audios": [item] if url else [],
+        "error": raw.get("error"),
+        "raw": raw,
+    }
+    return result
+
+@app.post("/api/canvas-audio", status_code=202)
+async def canvas_audio(payload: CanvasAudioRequest, response: Response):
+    provider = get_api_provider_exact(payload.provider_id)
+    if not provider.get("audio_models"):
+        raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider['id']} 未配置音频模型")
+    model = selected_model(payload.model, provider.get("default_audio_model") or provider["audio_models"][0])
+    if model not in provider.get("audio_models", []):
+        raise HTTPException(status_code=400, detail=f"音频模型未配置在当前 Provider：{model}")
+    payload.model = model
+    body = canvas_audio_request_body(payload)
+    body["wait"] = False
+    url = canvas_audio_generations_url(provider)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=60.0, write=60.0, pool=20.0)) as client:
+            upstream = await client.post(url, headers=api_headers(provider=provider), json=body)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"请求上游音频接口失败：{exc}") from exc
+    if upstream.status_code >= 400:
+        raise HTTPException(
+            status_code=upstream.status_code,
+            detail=upstream_error_message(upstream, "上游音频任务创建失败"),
+        )
+    try:
+        raw = upstream.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="上游音频接口返回非 JSON 响应") from exc
+    result = normalize_canvas_audio_result(raw, provider)
+    task_id = result["task_id"]
+    if not task_id:
+        raise HTTPException(status_code=502, detail="上游音频接口没有返回任务 ID")
+    with CANVAS_AUDIO_TASK_LOCK:
+        CANVAS_AUDIO_TASKS[task_id] = {
+            "provider_id": provider["id"],
+            "model": model,
+            "status": result["status"] or "queued",
+            "created_at": time.time(),
+        }
+    if result["status"] == "completed" and result.get("audio"):
+        response.status_code = 200
+    return result
+
+@app.get("/api/canvas-audio/{task_id}")
+async def canvas_audio_status(task_id: str):
+    with CANVAS_AUDIO_TASK_LOCK:
+        task = dict(CANVAS_AUDIO_TASKS.get(task_id) or {})
+    if not task:
+        raise HTTPException(status_code=404, detail="音频任务不存在或服务已重启")
+    provider = get_api_provider_exact(task["provider_id"])
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            upstream = await client.get(
+                canvas_audio_generations_url(provider, task_id),
+                headers=api_headers(provider=provider),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"查询上游音频任务失败：{exc}") from exc
+    if upstream.status_code >= 400:
+        raise HTTPException(
+            status_code=upstream.status_code,
+            detail=upstream_error_message(upstream, "查询上游音频任务失败"),
+        )
+    result = normalize_canvas_audio_result(upstream.json(), provider)
+    with CANVAS_AUDIO_TASK_LOCK:
+        if task_id in CANVAS_AUDIO_TASKS:
+            CANVAS_AUDIO_TASKS[task_id]["status"] = result["status"]
+    return result
+
+@app.delete("/api/canvas-audio/{task_id}")
+async def cancel_canvas_audio(task_id: str):
+    with CANVAS_AUDIO_TASK_LOCK:
+        task = dict(CANVAS_AUDIO_TASKS.get(task_id) or {})
+    if not task:
+        raise HTTPException(status_code=404, detail="音频任务不存在或服务已重启")
+    provider = get_api_provider_exact(task["provider_id"])
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            upstream = await client.delete(
+                canvas_audio_generations_url(provider, task_id),
+                headers=api_headers(provider=provider),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"取消上游音频任务失败：{exc}") from exc
+    if upstream.status_code >= 400:
+        raise HTTPException(
+            status_code=upstream.status_code,
+            detail=upstream_error_message(upstream, "取消上游音频任务失败"),
+        )
+    raw = upstream.json() if upstream.text else {"id": task_id, "status": "cancelled"}
+    result = normalize_canvas_audio_result(raw, provider)
+    with CANVAS_AUDIO_TASK_LOCK:
+        if task_id in CANVAS_AUDIO_TASKS:
+            CANVAS_AUDIO_TASKS[task_id]["status"] = "cancelled"
+    return {**result, "status": result["status"] or "cancelled"}
 
 @app.post("/api/canvas-video")
 async def canvas_video(payload: CanvasVideoRequest):

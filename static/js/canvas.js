@@ -378,6 +378,7 @@ let models = {gpt:'gpt-image-2', nano:'nano-banana-pro'};
 let imageModels = ['gpt-image-2', 'nano-banana-pro'];
 let chatModels = ['gpt-4o-mini'];
 let videoModels = [];
+let audioModels = [];
 let msChatModels = [];
 let apiProviders = [];
 let comfyBackendCount = 1;
@@ -618,7 +619,7 @@ function uniqueModels(list){
     });
 }
 function defaultApiProviders(){
-    return [{id:'comfly', name:'Comfly', base_url:'', enabled:true, image_models:imageModels, chat_models:chatModels, video_models:videoModels.length ? videoModels : DEFAULT_VIDEO_MODELS, has_key:false, key_preview:''}];
+    return [{id:'comfly', name:'Comfly', base_url:'', enabled:true, image_models:imageModels, chat_models:chatModels, video_models:videoModels.length ? videoModels : DEFAULT_VIDEO_MODELS, audio_models:audioModels, default_audio_model:audioModels[0] || '', model_metadata:{}, has_key:false, key_preview:''}];
 }
 function isRunningHubProvider(provider){
     const id = String(provider?.id || '').trim().toLowerCase();
@@ -696,6 +697,59 @@ function providerVideoModels(providerId){
     // 不走 providerById（会 fallback 到第一个 provider，造成串台），直接查精确匹配
     const provider = apiProviders.find(p => p.id === providerId);
     return uniqueModels(provider?.video_models || []);
+}
+function audioApiProviders(){
+    return (apiProviders.length ? apiProviders : defaultApiProviders())
+        .filter(p => p.enabled !== false && (p.audio_models || []).length);
+}
+function resolveAudioProviderId(id){
+    const providers = audioApiProviders();
+    return providers.find(p => p.id === id)?.id || providers[0]?.id || '';
+}
+function audioProviderOptions(selectedId){
+    const selected = resolveAudioProviderId(selectedId);
+    const providers = audioApiProviders();
+    if(!providers.length) return `<option value="" disabled selected>暂无音频 Provider</option>`;
+    return providers.map(provider => `<option value="${escapeHtml(provider.id)}" ${provider.id === selected ? 'selected' : ''}>${escapeHtml(provider.name || provider.id)}</option>`).join('');
+}
+function providerAudioModels(providerId){
+    const provider = apiProviders.find(p => p.id === providerId);
+    return uniqueModels(provider?.audio_models || []);
+}
+function providerModelMetadata(providerId, model){
+    const provider = apiProviders.find(p => p.id === providerId);
+    const map = provider?.model_metadata && typeof provider.model_metadata === 'object' ? provider.model_metadata : {};
+    return map[String(model || '').trim()] || {};
+}
+function providerModelDisplayName(providerId, model){
+    const provider = apiProviders.find(p => p.id === providerId);
+    const metadata = providerModelMetadata(providerId, model);
+    return String(metadata.display_name || provider?.model_names?.[model] || model || '').trim();
+}
+function providerModelDescription(providerId, model){
+    const metadata = providerModelMetadata(providerId, model);
+    return String(metadata.description_override || metadata.description || '').trim();
+}
+function modelDescriptionHtml(providerId, model){
+    const description = providerModelDescription(providerId, model);
+    return `<div class="model-purpose" title="${escapeAttr(description)}">${description ? escapeHtml(description) : '暂无模型备注'}</div>`;
+}
+function sanitizeAudioNodeProviderModel(node){
+    if(!node || node.type !== 'audio') return;
+    node.apiProvider = resolveAudioProviderId(node.apiProvider || '');
+    const models = providerAudioModels(node.apiProvider);
+    if(!models.length) node.model = '';
+    else if(!models.includes(node.model)) {
+        const provider = apiProviders.find(p => p.id === node.apiProvider);
+        node.model = models.includes(provider?.default_audio_model) ? provider.default_audio_model : models[0];
+        resetAudioModelParameters(node);
+    }
+}
+function audioModelOptions(selectedModel, providerId){
+    const models = providerAudioModels(providerId);
+    if(!models.length) return `<option value="" disabled selected>暂无音频模型，请到 API 设置添加</option>`;
+    const selected = models.includes(selectedModel) ? selectedModel : models[0];
+    return models.map(model => `<option value="${escapeHtml(model)}" ${model === selected ? 'selected' : ''}>${escapeHtml(providerModelDisplayName(providerId, model))}</option>`).join('');
 }
 function sanitizeVideoNodeProviderModel(node){
     if(!node || node.type !== 'video') return;
@@ -1475,6 +1529,7 @@ async function loadConfig(){
         imageModels = cfg.image_models?.length ? cfg.image_models : imageModels;
         chatModels = cfg.chat_models?.length ? cfg.chat_models : chatModels;
         videoModels = cfg.video_models?.length ? cfg.video_models : DEFAULT_VIDEO_MODELS;
+        audioModels = cfg.audio_models?.length ? cfg.audio_models : [];
         msChatModels = cfg.ms_chat_models?.length ? cfg.ms_chat_models : msChatModels;
         comfyBackendCount = Math.max(1, (cfg.comfy_instances || []).length || 1);
         apiProviders = Array.isArray(cfg.api_providers) && cfg.api_providers.length ? cfg.api_providers : defaultApiProviders();
@@ -2574,6 +2629,55 @@ function addVideoNode(point){
         running:false
     });
 }
+function resetAudioModelParameters(node){
+    if(!node) return;
+    node.audioStatus = '';
+    node.audioTaskId = '';
+    node.audioError = '';
+    if(node.model === 'eleven-v3-dialogue'){
+        node.dialogueMode = node.dialogueMode === 'multi' ? 'multi' : 'single';
+        node.voice = 'Aria';
+        node.languageCode = 'zh';
+        node.stability = 0.5;
+        node.useSpeakerBoost = true;
+        node.dialogue = Array.isArray(node.dialogue) && node.dialogue.length
+            ? node.dialogue.map(item => ({voice:String(item.voice || 'Aria'), text:String(item.text || '')}))
+            : [{voice:'Aria', text:''}, {voice:'Charlotte', text:''}];
+        delete node.languageBoost;
+        delete node.speed;
+        delete node.audioFormat;
+    } else {
+        node.voice = 'Chinese (Mandarin)_Warm_Bestie';
+        node.languageBoost = 'Chinese';
+        node.speed = 1;
+        node.audioFormat = 'mp3';
+        delete node.dialogueMode;
+        delete node.dialogue;
+        delete node.languageCode;
+        delete node.stability;
+        delete node.useSpeakerBoost;
+    }
+}
+function addAudioNode(point){
+    const p = point || defaultPoint(180, 0);
+    const providerId = audioApiProviders()[0]?.id || '';
+    const provider = apiProviders.find(item => item.id === providerId);
+    const models = providerAudioModels(providerId);
+    const node = {
+        id:uid('aud'),
+        type:'audio',
+        x:p.x,
+        y:p.y,
+        apiProvider:providerId,
+        model:models.includes(provider?.default_audio_model) ? provider.default_audio_model : (models[0] || ''),
+        prompt:'',
+        inputs:[],
+        running:false,
+        generatedOutputs:[]
+    };
+    resetAudioModelParameters(node);
+    return addNode(node);
+}
 function addRhNode(point){
     const p = point || defaultPoint(180, 0);
     return addNode({
@@ -3158,6 +3262,7 @@ function linkCreateOptions(state){
                 {type:'rh', label:tr('canvas.rhGenerate'), icon:'workflow'},
                 {type:'ltxDirector', label:tr('canvas.ltxDirector'), icon:'film'},
                 {type:'video', label:tr('canvas.videoGenerateNode'), icon:'clapperboard'},
+                {type:'audio', label:tr('canvas.audioGenerateNode'), icon:'audio-lines'},
                 ...(node.type === 'output' ? [] : [{type:'llm', label:'LLM', icon:'message-square-text'}])
             ];
         }
@@ -3202,12 +3307,16 @@ function openGeneratorNodeMenu(nodeId, clientX, clientY){
     const inputOptions = linkCreateOptions({originId:nodeId, originKind:'in', point});
     const outputOptions = [
         {type:'output', label:'Output', icon:'circle-dot'},
+        ...(node.type === 'audio' ? [
+            {type:'video', label:tr('canvas.videoGenerateNode'), icon:'clapperboard'}
+        ] : []),
         ...(CANVAS_IMAGE_OUTPUT_TYPES.includes(node.type) ? [
             {type:'generator', label:tr('canvas.apiGenerate'), icon:'wand-sparkles'},
             {type:'msgen', label:tr('canvas.modelscopeGenerate'), icon:'cloud-lightning'},
             {type:'comfy', label:tr('canvas.comfyGenerate'), icon:'workflow'},
             {type:'ltxDirector', label:tr('canvas.ltxDirector'), icon:'film'},
-            {type:'video', label:tr('canvas.videoGenerateNode'), icon:'clapperboard'}
+            {type:'video', label:tr('canvas.videoGenerateNode'), icon:'clapperboard'},
+            {type:'audio', label:tr('canvas.audioGenerateNode'), icon:'audio-lines'}
         ] : [])
     ];
     const buttonsHtml = (options, kind) => `<div class="node-port-menu-grid">${options.map(opt => `<button class="menu-btn" data-link-create="${escapeAttr(opt.type)}" data-link-kind="${kind}" title="${escapeAttr(opt.label)}"><i data-lucide="${escapeAttr(opt.icon)}"></i><span>${escapeHtml(opt.label.replace('生成', ''))}</span></button>`).join('')}</div>`;
@@ -3529,6 +3638,7 @@ function createNodeByType(type, point){
     if(type === 'generator') return addGeneratorNode(point);
     if(type === 'msgen') return addMsGenNode(point);
     if(type === 'video') return addVideoNode(point);
+    if(type === 'audio') return addAudioNode(point);
     if(type === 'rh') return addRhNode(point);
     if(type === 'comfy') return addComfyNode(point);
     if(type === 'ltxDirector') return addLTXDirectorNode(point);
@@ -3544,6 +3654,7 @@ function menuAdd(type){
     if(type === 'generator') addGeneratorNode(menuPoint);
     if(type === 'msgen') addMsGenNode(menuPoint);
     if(type === 'video') addVideoNode(menuPoint);
+    if(type === 'audio') addAudioNode(menuPoint);
     if(type === 'rh') addRhNode(menuPoint);
     if(type === 'comfy') addComfyNode(menuPoint);
     if(type === 'ltxDirector') addLTXDirectorNode(menuPoint);
@@ -6063,10 +6174,10 @@ function renderNode(node){
         if(node.type === 'output') openOutputNodeMenu(node.id, e.clientX, e.clientY);
         else openGeneratorNodeMenu(node.id, e.clientX, e.clientY);
     };
-    const title = node.type === 'image' ? 'Image' : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'comfy' ? 'ComfyUI' : node.type === 'ltxDirector' ? tr('canvas.ltxDirector') : node.type === 'rh' ? 'RunningHub' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : tr('canvas.apiGenerate');
+    const title = node.type === 'image' ? 'Image' : node.type === 'prompt' ? 'Prompt' : node.type === 'loop' ? tr('canvas.loopNode') : node.type === 'promptGroup' ? 'Prompts' : node.type === 'group' ? 'Group' : node.type === 'output' ? 'Output' : node.type === 'llm' ? 'LLM' : node.type === 'comfy' ? 'ComfyUI' : node.type === 'ltxDirector' ? tr('canvas.ltxDirector') : node.type === 'rh' ? 'RunningHub' : node.type === 'msgen' ? tr('canvas.modelscopeGenerate') : node.type === 'video' ? tr('canvas.videoGenerateNode') : node.type === 'audio' ? tr('canvas.audioGenerateNode') : tr('canvas.apiGenerate');
     const displayTitle = node.type === 'image' && node.url ? nodeTitleForMedia(node) : title;
     // 失败徽章只在一键运行模式中显示，单节点失败已通过 alert 提示
-    const showStatus = ['generator','msgen','comfy','ltxDirector','llm','video','rh'].includes(node.type) && node.runStatus
+    const showStatus = ['generator','msgen','comfy','ltxDirector','llm','video','audio','rh'].includes(node.type) && node.runStatus
         && (node.runStatus !== 'failed' || node._cascadeFailed);
     const statusHtml = showStatus ? (() => {
         const label = { queued:'排队中', running:'运行中', done:'完成', failed:'失败' }[node.runStatus] || '';
@@ -6220,6 +6331,7 @@ function renderNode(node){
     if(node.type === 'generator') body.appendChild(renderGeneratorBody(node));
     if(node.type === 'msgen') body.appendChild(renderMsGenBody(node));
     if(node.type === 'video') body.appendChild(renderVideoBody(node));
+    if(node.type === 'audio') body.appendChild(renderAudioBody(node));
     if(node.type === 'rh') body.appendChild(renderRhBody(node));
     if(node.type === 'comfy') body.appendChild(renderComfyBody(node));
     if(node.type === 'ltxDirector') body.appendChild(renderLTXDirectorBody(node));
@@ -6242,8 +6354,8 @@ function renderNode(node){
         if(e.button !== 0 || !isNodeDragSurface(e.target)) return;
         startNodeDrag(e, node);
     };
-    const canInput = ['generator','comfy','ltxDirector','output','llm','msgen','video','rh'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
-    const canOutput = ['image','prompt','loop','group','promptGroup','generator','comfy','ltxDirector','llm','msgen','video','rh','output'].includes(node.type);
+    const canInput = ['generator','comfy','ltxDirector','output','llm','msgen','video','audio','rh'].includes(node.type) || (node.type === 'loop' && (node.imageInput || node.showPrompt));
+    const canOutput = ['image','prompt','loop','group','promptGroup','generator','comfy','ltxDirector','llm','msgen','video','audio','rh','output'].includes(node.type);
     if(canInput) el.insertAdjacentHTML('beforeend', `<div class="port in" title="${tr('canvas.connectHere')}"></div>`);
     if(canOutput) el.insertAdjacentHTML('beforeend', `<div class="port out" title="${tr('canvas.dragConnect')}"></div>`);
     el.insertAdjacentHTML('beforeend', `<div class="resize-handle" title="${tr('canvas.resize')}"></div>`);
@@ -6271,6 +6383,7 @@ function bindOutputWrap(wrap, node){
     const img = wrap.querySelector('img');
     const video = wrap.querySelector('video');
     const audio = wrap.querySelector('audio');
+    const audioDownload = wrap.querySelector('[data-audio-download]');
     const fileCard = wrap.querySelector('.output-file-card');
     const playBtn = wrap.querySelector('.canvas-video-play');
     const del = wrap.querySelector('.output-del');
@@ -6303,6 +6416,28 @@ function bindOutputWrap(wrap, node){
             e.stopPropagation();
             openOutputLightbox(video.dataset.url, node);
         };
+    }
+    if(audio){
+        wrap.draggable = true;
+        wrap.ondragstart = e => {
+            if(e.target.closest?.('audio,button')) {
+                e.preventDefault();
+                return;
+            }
+            const url = audio.dataset.url || wrap.dataset.outputUrl || '';
+            if(!url) return;
+            e.stopPropagation();
+            e.dataTransfer.effectAllowed = 'copy';
+            e.dataTransfer.setData('application/x-canvas-output-image', url);
+            e.dataTransfer.setData('text/uri-list', url);
+        };
+        audioDownload?.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            const url = audio.dataset.url || wrap.dataset.outputUrl || '';
+            const item = (node.images || []).find(value => outputUrlValue(value) === url);
+            downloadUrl(url, item?.name || outputDownloadName(url)).catch(err => alert(err.message || '下载失败'));
+        });
     }
     if(fileCard){
         fileCard.onclick = e => {
@@ -6415,6 +6550,7 @@ function defaultNodeSize(type){
     if(type === 'generator') return {w:380, h:0};
     if(type === 'msgen') return {w:380, h:0};
     if(type === 'video') return {w:400, h:0};
+    if(type === 'audio') return {w:420, h:0};
     if(type === 'rh') return {w:430, h:0};
     if(type === 'comfy') return {w:420, h:460};
     if(type === 'ltxDirector') return {w:1000, h:800};
@@ -8209,6 +8345,7 @@ function renderGeneratorBody(node){
                 <select class="select-lite provider-select">${providerOptions(node.apiProvider)}</select>
                 <select class="select-lite model-select">${imageModelOptions(node.model, node.apiProvider)}</select>
             </div>
+            ${modelDescriptionHtml(node.apiProvider, node.model)}
             <div class="gen-settings-row api-size-row">
                 <select class="select-lite resolution compact-select" data-field="resolution">
                     <option value="auto">自动</option>
@@ -8284,6 +8421,8 @@ function renderGeneratorBody(node){
         node._apiResolutionUserSet = false;
         node.resolution = defaultApiImageResolution(node.model);
         modelSelect.innerHTML = imageModelOptions(node.model, node.apiProvider);
+        const purpose = wrap.querySelector('.model-purpose');
+        if(purpose) purpose.textContent = providerModelDescription(node.apiProvider, node.model) || '暂无模型备注';
         syncSizeControls();
         syncQualityControls();
         scheduleSave();
@@ -8293,6 +8432,8 @@ function renderGeneratorBody(node){
     modelSelect.onchange = e => {
         e.stopPropagation();
         node.model = e.target.value;
+        const purpose = wrap.querySelector('.model-purpose');
+        if(purpose) purpose.textContent = providerModelDescription(node.apiProvider, node.model) || '暂无模型备注';
         node._apiResolutionUserSet = false;
         if(node.resolution !== 'custom') node.resolution = defaultApiImageResolution(node.model);
         syncSizeControls();
@@ -8506,6 +8647,146 @@ function renderGeneratorBody(node){
     bindCascadeButtons(wrap, node.id);
     return wrap;
 }
+function renderAudioBody(node){
+    const wrap = document.createElement('div');
+    wrap.className = 'generator-body audio-generator-body';
+    sanitizeAudioNodeProviderModel(node);
+    const isEleven = node.model === 'eleven-v3-dialogue';
+    const multi = isEleven && node.dialogueMode === 'multi';
+    const dialogue = Array.isArray(node.dialogue) && node.dialogue.length
+        ? node.dialogue
+        : [{voice:'Aria', text:''}, {voice:'Charlotte', text:''}];
+    node.dialogue = dialogue;
+    const status = String(node.audioStatus || '').trim();
+    const statusLabel = {
+        queued:'queued',
+        in_progress:'in_progress',
+        completed:'completed',
+        cancelled:'cancelled'
+    }[status] || '';
+    const dialogueHtml = dialogue.map((item, index) => `
+        <div class="audio-dialogue-row" data-dialogue-index="${index}">
+            <div class="audio-dialogue-head">
+                <input class="setting-input audio-dialogue-voice" value="${escapeAttr(item.voice || 'Aria')}" placeholder="角色声音">
+                <button type="button" class="icon-btn" data-dialogue-move="-1" title="上移"><i data-lucide="chevron-up"></i></button>
+                <button type="button" class="icon-btn" data-dialogue-move="1" title="下移"><i data-lucide="chevron-down"></i></button>
+                <button type="button" class="icon-btn" data-dialogue-delete title="删除"><i data-lucide="trash-2"></i></button>
+            </div>
+            <textarea class="setting-input audio-dialogue-text" rows="2" placeholder="角色台词，可使用 [laughs] 等情绪标签">${escapeHtml(item.text || '')}</textarea>
+        </div>
+    `).join('');
+    wrap.innerHTML = `
+        <div class="gen-settings">
+            <div class="gen-settings-row">
+                <select class="select-lite audio-provider" style="flex:1">${audioProviderOptions(node.apiProvider)}</select>
+                <select class="select-lite audio-model" style="flex:2">${audioModelOptions(node.model, node.apiProvider)}</select>
+            </div>
+            ${modelDescriptionHtml(node.apiProvider, node.model)}
+            ${isEleven ? `
+                <div class="audio-mode-switch">
+                    <button type="button" data-audio-mode="single" class="${multi ? '' : 'active'}">单角色</button>
+                    <button type="button" data-audio-mode="multi" class="${multi ? 'active' : ''}">多角色对白</button>
+                </div>
+            ` : ''}
+            ${multi ? `
+                <div class="audio-dialogue-list">${dialogueHtml}</div>
+                <button type="button" class="secondary-btn audio-add-dialogue"><i data-lucide="plus"></i>添加角色台词</button>
+                <div class="gen-settings-row">
+                    <label class="field" style="flex:1"><div class="setting-title">语言</div><input class="setting-input audio-language-code" value="${escapeAttr(node.languageCode || 'zh')}" placeholder="zh"></label>
+                    <label class="field" style="flex:1"><div class="setting-title">稳定度</div><input class="setting-input audio-stability" type="number" min="0" max="1" step="0.05" value="${Number(node.stability ?? 0.5)}"></label>
+                    <button type="button" class="setting-check ${node.useSpeakerBoost !== false ? 'active' : ''}" data-speaker-boost><span class="check-dot"></span>Speaker boost</button>
+                </div>
+            ` : `
+                <label class="field full">
+                    <div class="setting-title">${isEleven ? '台词' : 'Prompt'}</div>
+                    <textarea class="setting-input audio-prompt" rows="4" placeholder="${isEleven ? '[excited] 我们开始吧！' : '欢迎来到今天的节目。'}">${escapeHtml(node.prompt || '')}</textarea>
+                </label>
+                <div class="gen-settings-row">
+                    <label class="field" style="flex:2"><div class="setting-title">${isEleven ? '声音/角色' : '声音'}</div><input class="setting-input audio-voice" value="${escapeAttr(node.voice || (isEleven ? 'Aria' : 'Chinese (Mandarin)_Warm_Bestie'))}"></label>
+                    ${isEleven ? '' : `<label class="field" style="flex:1"><div class="setting-title">语速</div><input class="setting-input audio-speed" type="number" min="0.5" max="2" step="0.05" value="${Number(node.speed || 1)}"></label>`}
+                </div>
+                ${isEleven ? '' : `
+                    <div class="gen-settings-row">
+                        <label class="field" style="flex:1"><div class="setting-title">语言</div><input class="setting-input audio-language-boost" value="${escapeAttr(node.languageBoost || 'Chinese')}"></label>
+                        <label class="field" style="flex:1"><div class="setting-title">格式</div><select class="select-lite audio-format"><option value="mp3">mp3</option><option value="wav">wav</option><option value="ogg">ogg</option></select></label>
+                    </div>
+                `}
+            `}
+        </div>
+        ${statusLabel ? `<div class="audio-task-status ${escapeAttr(status)}"><span class="dot"></span>${escapeHtml(statusLabel)}${node.audioTaskId ? ` · ${escapeHtml(node.audioTaskId)}` : ''}</div>` : ''}
+        ${node.audioResult?.url ? `<div class="audio-result-card"><audio src="${escapeAttr(node.audioResult.url)}" controls preload="metadata"></audio><div>${escapeHtml(node.audioResult.name || 'generated-audio')}</div></div>` : ''}
+        <div class="gen-run-row">
+            ${node.running
+                ? `<button class="gen-btn running" type="button" disabled><i data-lucide="loader-circle"></i>生成中</button><button class="secondary-btn audio-cancel" type="button">取消</button>`
+                : `<button class="gen-btn audio-generate" type="button" ${node.model ? '' : 'disabled'}><i data-lucide="audio-lines"></i>生成音频</button>`}
+            ${cascadeBtnHtml(node)}
+        </div>
+        ${retryBarHtml(node)}
+    `;
+    const providerSelect = wrap.querySelector('.audio-provider');
+    const modelSelect = wrap.querySelector('.audio-model');
+    providerSelect.onchange = e => {
+        node.apiProvider = e.target.value;
+        const provider = apiProviders.find(item => item.id === node.apiProvider);
+        const models = providerAudioModels(node.apiProvider);
+        node.model = models.includes(provider?.default_audio_model) ? provider.default_audio_model : (models[0] || '');
+        resetAudioModelParameters(node);
+        render();
+        scheduleSave();
+    };
+    modelSelect.onchange = e => {
+        node.model = e.target.value;
+        resetAudioModelParameters(node);
+        render();
+        scheduleSave();
+    };
+    wrap.querySelectorAll('[data-audio-mode]').forEach(button => {
+        button.onclick = () => {
+            node.dialogueMode = button.dataset.audioMode;
+            render();
+            scheduleSave();
+        };
+    });
+    wrap.querySelector('.audio-prompt')?.addEventListener('input', e => { node.prompt = e.target.value; scheduleSave(); });
+    wrap.querySelector('.audio-voice')?.addEventListener('input', e => { node.voice = e.target.value; scheduleSave(); });
+    wrap.querySelector('.audio-speed')?.addEventListener('input', e => { node.speed = Math.max(.5, Math.min(2, Number(e.target.value || 1))); scheduleSave(); });
+    wrap.querySelector('.audio-language-boost')?.addEventListener('input', e => { node.languageBoost = e.target.value; scheduleSave(); });
+    const formatSelect = wrap.querySelector('.audio-format');
+    if(formatSelect){
+        formatSelect.value = node.audioFormat || 'mp3';
+        formatSelect.onchange = e => { node.audioFormat = e.target.value; scheduleSave(); };
+    }
+    wrap.querySelector('.audio-language-code')?.addEventListener('input', e => { node.languageCode = e.target.value; scheduleSave(); });
+    wrap.querySelector('.audio-stability')?.addEventListener('input', e => { node.stability = Math.max(0, Math.min(1, Number(e.target.value || 0))); scheduleSave(); });
+    wrap.querySelector('[data-speaker-boost]')?.addEventListener('click', () => { node.useSpeakerBoost = node.useSpeakerBoost === false; render(); scheduleSave(); });
+    wrap.querySelectorAll('.audio-dialogue-row').forEach(row => {
+        const index = Number(row.dataset.dialogueIndex);
+        row.querySelector('.audio-dialogue-voice').oninput = e => { node.dialogue[index].voice = e.target.value; scheduleSave(); };
+        row.querySelector('.audio-dialogue-text').oninput = e => { node.dialogue[index].text = e.target.value; scheduleSave(); };
+        row.querySelector('[data-dialogue-delete]').onclick = () => {
+            node.dialogue.splice(index, 1);
+            if(!node.dialogue.length) node.dialogue.push({voice:'Aria', text:''});
+            render(); scheduleSave();
+        };
+        row.querySelectorAll('[data-dialogue-move]').forEach(button => {
+            button.onclick = () => {
+                const target = index + Number(button.dataset.dialogueMove);
+                if(target < 0 || target >= node.dialogue.length) return;
+                [node.dialogue[index], node.dialogue[target]] = [node.dialogue[target], node.dialogue[index]];
+                render(); scheduleSave();
+            };
+        });
+    });
+    wrap.querySelector('.audio-add-dialogue')?.addEventListener('click', () => {
+        node.dialogue.push({voice:'Aria', text:''});
+        render(); scheduleSave();
+    });
+    wrap.querySelector('.audio-generate')?.addEventListener('click', () => runCanvasGenerate(node.id));
+    wrap.querySelector('.audio-cancel')?.addEventListener('click', () => cancelAudioNode(node.id));
+    bindCascadeButtons(wrap, node.id);
+    return wrap;
+}
+
 function renderVideoBody(node){
     const wrap = document.createElement('div');
     wrap.className = 'generator-body';
@@ -8530,6 +8811,7 @@ function renderVideoBody(node){
                 <select class="select-lite video-provider" style="flex:1">${videoProviderOptions(node.apiProvider)}</select>
                 <select class="select-lite video-model" style="flex:2">${videoModelOptions(node.model, node.apiProvider)}</select>
             </div>
+            ${modelDescriptionHtml(node.apiProvider, node.model)}
             <div class="gen-settings-row">
                 <label class="field" style="flex:1">
                     <div class="setting-title">${tr('canvas.videoDuration')}</div>
@@ -8595,9 +8877,17 @@ function renderVideoBody(node){
         const models = providerVideoModels(node.apiProvider);
         if(!models.includes(node.model)) node.model = models[0] || node.model;
         modelSelect.innerHTML = videoModelOptions(node.model, node.apiProvider);
+        const purpose = wrap.querySelector('.model-purpose');
+        if(purpose) purpose.textContent = providerModelDescription(node.apiProvider, node.model) || '暂无模型备注';
         scheduleSave();
     };
-    modelSelect.onchange = e => { e.stopPropagation(); node.model = e.target.value; scheduleSave(); };
+    modelSelect.onchange = e => {
+        e.stopPropagation();
+        node.model = e.target.value;
+        const purpose = wrap.querySelector('.model-purpose');
+        if(purpose) purpose.textContent = providerModelDescription(node.apiProvider, node.model) || '暂无模型备注';
+        scheduleSave();
+    };
     durationSelect.oninput = e => { e.stopPropagation(); node.duration = Math.max(1, Math.min(60, Number(e.target.value || 5))); scheduleSave(); };
     durationSelect.onblur = e => { e.target.value = String(Math.max(1, Math.min(60, Number(node.duration || 5)))); };
     aspectSelect.onchange = e => { e.stopPropagation(); node.aspectRatio = e.target.value; scheduleSave(); };
@@ -10154,9 +10444,9 @@ function updateComfyField(node, input, event){
     scheduleSave();
 }
 
-const CANVAS_GENERATOR_TYPES = ['generator','msgen','comfy','ltxDirector','video','rh'];
+const CANVAS_GENERATOR_TYPES = ['generator','msgen','comfy','ltxDirector','video','audio','rh'];
 const CANVAS_IMAGE_OUTPUT_TYPES = ['generator','msgen','comfy','ltxDirector','rh'];
-const CANVAS_MEDIA_OUTPUT_TYPES = ['generator','msgen','comfy','ltxDirector','video','rh'];
+const CANVAS_MEDIA_OUTPUT_TYPES = ['generator','msgen','comfy','ltxDirector','video','audio','rh'];
 function hasExplicitOutputConnection(nodeId){
     return connections.some(c => {
         if(c.from !== nodeId) return false;
@@ -10231,13 +10521,19 @@ function syncConnectedOutputsFromGenerated(node, outputs){
     outputNodesForSource(node.id).forEach(out => appendOutputImagesWithoutDuplicates(out, list));
 }
 function generatedImageRefs(node){
-    const keepGeneratedMedia = ['rh','ltxDirector','video'].includes(node?.type);
+    const keepGeneratedMedia = ['rh','ltxDirector','video','audio'].includes(node?.type);
     return (node?.generatedOutputs || [])
         .map((item, i) => {
             const url = outputUrlValue(item);
             if(!url) return null;
             const kind = mediaKindForOutputItem(item);
-            return {url, name:outputImageName(url) || `${node.type || 'generated'}-${i + 1}`, kind, index:i};
+            return {
+                url,
+                name:(item && typeof item === 'object' ? item.name : '') || outputImageName(url) || `${node.type || 'generated'}-${i + 1}`,
+                mime:item && typeof item === 'object' ? (item.mime || item.content_type || '') : '',
+                kind,
+                index:i
+            };
         })
         .filter(Boolean)
         .filter(ref => keepGeneratedMedia || ref.kind === 'image')
@@ -10629,6 +10925,137 @@ async function runVideoNode(nodeId, opts={}){
     } finally {
         node.running = false;
         refreshRunNodes(node, out);
+    }
+}
+async function cancelAudioNode(nodeId){
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node || !node.audioTaskId || node._audioCancelRequested) return;
+    node._audioCancelRequested = true;
+    try {
+        const response = await fetch(`/api/canvas-audio/${encodeURIComponent(node.audioTaskId)}`, {method:'DELETE'});
+        if(!response.ok) throw new Error(await responseErrorMessage(response, '取消音频任务失败'));
+        node.audioStatus = 'cancelled';
+        node.runStatus = '';
+    } catch(err) {
+        node.audioError = err.message || String(err);
+        showErrorModal(node.audioError, '取消音频任务');
+    } finally {
+        node.running = false;
+        refreshNodes([node.id]);
+        scheduleSave();
+    }
+}
+async function runAudioNode(nodeId, opts={}){
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node || (node.running && !opts.cascade)) return;
+    const cascadeTargetId = cascadeTargetIdFromOptions(opts);
+    const sources = orderedSources(node, generatorSources(node));
+    const connectedPrompt = sources.map(source => source.prompt).filter(Boolean).join('\n\n').trim();
+    const prompt = String(node.prompt || connectedPrompt || '').trim();
+    const isEleven = node.model === 'eleven-v3-dialogue';
+    const inputs = isEleven && node.dialogueMode === 'multi'
+        ? (node.dialogue || []).map(item => ({voice:String(item.voice || '').trim(), text:String(item.text || '').trim()})).filter(item => item.text)
+        : [];
+    if(!inputs.length && !prompt){
+        alert(isEleven ? '请输入台词或至少一条角色对白' : '请输入要生成的旁白文本');
+        return;
+    }
+    let out = outputForNode(node, 480);
+    const pendingId = uid('p');
+    const run = runSnapshot(node, prompt || inputs.map(item => `${item.voice}: ${item.text}`).join('\n'), []);
+    if(out) out._pending = [...(out._pending || []), makePendingForRun(pendingId, run, node, {cascadeTargetId})];
+    node.running = true;
+    node._audioCancelRequested = false;
+    node.audioStatus = 'queued';
+    node.audioError = '';
+    node.audioTaskId = '';
+    refreshRunNodes(node, out);
+    scheduleSave();
+    try {
+        const createResponse = await cascadeFetch('/api/canvas-audio', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                provider_id:resolveAudioProviderId(node.apiProvider),
+                model:node.model,
+                prompt,
+                voice:node.voice || '',
+                inputs,
+                language_boost:node.languageBoost || '',
+                language_code:node.languageCode || '',
+                speed:Number(node.speed || 1),
+                format:node.audioFormat || 'mp3',
+                stability:isEleven && node.dialogueMode === 'multi' ? Number(node.stability ?? 0.5) : null,
+                use_speaker_boost:isEleven && node.dialogueMode === 'multi' ? node.useSpeakerBoost !== false : null
+            })
+        }, {cascadeTargetId});
+        if(!createResponse.ok) throw new Error(await responseErrorMessage(createResponse, '音频任务创建失败'));
+        let result = await createResponse.json();
+        node.audioTaskId = result.task_id || result.id || '';
+        node.audioStatus = result.status || 'queued';
+        refreshRunNodes(node, out);
+        scheduleSave();
+        while(!result.audio?.url && !result.audios?.[0]?.url){
+            if(node._audioCancelRequested) throw new Error('音频任务已取消');
+            if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
+            if(['cancelled','failed'].includes(String(result.status || '').toLowerCase())){
+                throw new Error(result.error?.message || result.error || `音频任务${result.status}`);
+            }
+            if(String(result.status || '').toLowerCase() === 'completed'){
+                throw new Error('音频任务已完成，但上游没有返回可播放的音频 URL');
+            }
+            await sleep(1500);
+            const statusResponse = await cascadeFetch(`/api/canvas-audio/${encodeURIComponent(node.audioTaskId)}`, {}, {cascadeTargetId});
+            if(!statusResponse.ok) throw new Error(await responseErrorMessage(statusResponse, '查询音频任务失败'));
+            result = await statusResponse.json();
+            node.audioStatus = result.status || node.audioStatus;
+            refreshRunNodes(node, out);
+            scheduleSave();
+        }
+        const audio = result.audio || result.audios?.[0];
+        const output = {
+            ...audio,
+            url:audio.url,
+            kind:'audio',
+            name:audio.name || audio.file_name || 'generated-audio.mp3',
+            mime:audio.mime || audio.content_type || 'audio/mpeg'
+        };
+        const meta = collectRunMeta(out, pendingId);
+        if(out) out._pending = (out._pending || []).filter(item => item.id !== pendingId);
+        node.audioResult = output;
+        node.audioStatus = 'completed';
+        node.runStatus = 'done';
+        node.runError = '';
+        appendOutputImages(out, [output], null, [{...meta, kind:'audio'}]);
+        mergeGeneratedOutputs(node, [output], Boolean(opts.cascade));
+        addGenerationLog({run, outputs:[output], runMs:meta.runMs || 0});
+        refreshRunNodes(node, out);
+        scheduleSave();
+    } catch(err) {
+        if(isCascadeAbortError(err) && node.audioTaskId && !node._audioCancelRequested){
+            node._audioCancelRequested = true;
+            try {
+                await fetch(`/api/canvas-audio/${encodeURIComponent(node.audioTaskId)}`, {method:'DELETE'});
+                node.audioStatus = 'cancelled';
+            } catch(_) {}
+        }
+        const meta = collectRunMeta(out, pendingId);
+        if(out) out._pending = (out._pending || []).filter(item => item.id !== pendingId);
+        const cancelled = node._audioCancelRequested || node.audioStatus === 'cancelled';
+        node.audioStatus = cancelled ? 'cancelled' : node.audioStatus;
+        node.runStatus = cancelled ? '' : 'failed';
+        node.runError = cancelled ? '' : (err.message || String(err));
+        node.audioError = node.runError;
+        addGenerationLog({run, outputs:[], runMs:meta.runMs || 0, error:err.message || String(err)});
+        refreshRunNodes(node, out);
+        scheduleSave();
+        if(opts.cascade && (!cancelled || isCascadeAbortError(err))) throw err;
+        if(!cancelled) showErrorModal(err.message || '音频生成失败', '音频生成');
+    } finally {
+        node.running = false;
+        delete node._audioCancelRequested;
+        refreshRunNodes(node, out);
+        scheduleSave();
     }
 }
 async function uploadCanvasUrlToComfy(url){
@@ -11585,6 +12012,7 @@ function runCascadeNodeByType(node, opts={}){
     if(node.type === 'ltxDirector') return runLTXDirectorNode(node.id, runOpts);
     if(node.type === 'llm') return runLLMNode(node.id, runOpts);
     if(node.type === 'video') return runVideoNode(node.id, runOpts);
+    if(node.type === 'audio') return runAudioNode(node.id, runOpts);
     if(node.type === 'rh') return runRhNode(node.id, runOpts);
     return Promise.resolve();
 }
@@ -11619,7 +12047,7 @@ async function runLimitedCascadeRounds(rounds, limit, runner){
     return Promise.allSettled(workers);
 }
 function canvasRunTypes(){
-    return ['generator','msgen','comfy','ltxDirector','llm','video','rh'];
+    return ['generator','msgen','comfy','ltxDirector','llm','video','audio','rh'];
 }
 function canvasWorkflowEdges(){
     const runTypes = canvasRunTypes();
@@ -11863,6 +12291,7 @@ async function runOneCascadePass(order, options={}){
             else if(node.type === 'ltxDirector') await runLTXDirectorNode(id, {cascade:true, cascadeTargetId:targetId});
             else if(node.type === 'llm') await runLLMNode(id, {cascade:true, cascadeTargetId:targetId});
             else if(node.type === 'video') await runVideoNode(id, {cascade:true, cascadeTargetId:targetId});
+            else if(node.type === 'audio') await runAudioNode(id, {cascade:true, cascadeTargetId:targetId});
             else if(node.type === 'rh') await runRhNode(id, {cascade:true, cascadeTargetId:targetId});
             if(targetId) ensureCascadeActive(targetId);
             node.runStatus = 'done';
@@ -12215,17 +12644,19 @@ function makePendingForRun(id, run, node, options={}, task={}){
 }
 function mergeGeneratedOutputs(node, outputs, append=false){
     if(!node) return;
-    const keepGeneratedMedia = ['rh','ltxDirector','video'].includes(node.type);
+    const keepGeneratedMedia = ['rh','ltxDirector','video','audio'].includes(node.type);
     const clean = (outputs || []).map(item => {
         const url = outputUrlValue(item);
         if(!url) return null;
         const kind = node.type === 'video'
             ? 'video'
+            : node.type === 'audio'
+                ? 'audio'
             : ['rh','ltxDirector'].includes(node.type) && isVideoUrl(url)
                 ? 'video'
                 : mediaKindForOutputItem(item);
         if(!keepGeneratedMedia && kind !== 'image') return null;
-        return kind === 'image' ? url : {url, kind};
+        return kind === 'image' ? url : (item && typeof item === 'object' ? {...item, url, kind} : {url, kind});
     }).filter(Boolean);
     if(!append){
         node.generatedOutputs = clean;
@@ -12510,7 +12941,7 @@ function renderOutputMedia(item, useGridLayout=false){
         return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasVideoPreviewHtml(url, useGridLayout ? 512 : 768, 'alt="video output" data-video-fallback-attrs="controls data-output-video-fallback=&quot;1&quot;"')}${timePill}<button class="canvas-video-play output-video-play" type="button" title="播放"><i data-lucide="play"></i></button><div class="output-video-badge"><i data-lucide="play" class="w-3 h-3"></i>VIDEO</div><button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
     if(kind === 'audio'){
-        return `<div class="output-img-wrap output-audio-wrap" data-output-url="${safe}"${gridStyle}><div class="output-audio-card"><i data-lucide="file-audio" class="w-7 h-7"></i><span>${escapeHtml(outputImageName(url))}</span><audio src="${safe}" data-url="${safe}" controls preload="metadata"></audio></div>${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+        return `<div class="output-img-wrap output-audio-wrap" data-output-url="${safe}"${gridStyle}><div class="output-audio-card"><i data-lucide="file-audio" class="w-7 h-7"></i><span>${escapeHtml(meta.name || outputImageName(url))}</span><audio src="${safe}" data-url="${safe}" controls preload="metadata"></audio><button type="button" class="output-audio-download" data-audio-download title="${tr('canvas.download')}"><i data-lucide="download"></i></button></div>${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
     if(kind === 'text' || kind === 'file'){
         const icon = kind === 'text' ? 'file-text' : 'file';
@@ -12565,6 +12996,7 @@ function appendOutputImages(out, images, compareRef, metas=[], layout=null){
         const item = {url:outputUrlValue(url), viewed:false, runMs:meta.runMs || 0, run:meta.run || null};
         if(source.name) item.name = source.name;
         if(source.kind || source.mediaKind) item.kind = source.kind || source.mediaKind;
+        if(source.mime || source.content_type) item.mime = source.mime || source.content_type;
         if(meta.kind) item.kind = meta.kind;
         if(meta.grid) item.grid = meta.grid;
         return item;

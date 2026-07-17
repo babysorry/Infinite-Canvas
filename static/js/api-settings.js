@@ -64,6 +64,8 @@ let rhWorkflowEditorZoom = document.getElementById('rhWorkflowEditorZoom');
 const imageModelList = document.getElementById('imageModelList');
 const chatModelList = document.getElementById('chatModelList');
 const videoModelList = document.getElementById('videoModelList');
+const audioModelList = document.getElementById('audioModelList');
+const defaultAudioModelSelect = document.getElementById('defaultAudioModelSelect');
 const msLoraBlock = document.getElementById('msLoraBlock');
 const msLoraList = document.getElementById('msLoraList');
 const recommendApiOverlay = document.getElementById('recommendApiOverlay');
@@ -2603,6 +2605,7 @@ function renderEditor(){
     renderModels('image');
     renderModels('chat');
     renderModels('video');
+    renderModels('audio');
     if(isModelScope) renderMsLoras();
     else if(msLoraList) msLoraList.innerHTML = '';
     renderProviderList();
@@ -3078,12 +3081,7 @@ async function testConnection(){
             }
             if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
             // 存入 picker 状态并启用「选择模型」按钮，但不自动弹出
-            lastFetchedAll = data.all || [];
-            lastFetchedSuggestion = {
-                image: new Set(data.image_models || []),
-                chat: new Set(data.chat_models || []),
-                video: new Set(data.video_models || []),
-            };
+            setFetchedModelState(data);
             const openBtn = document.getElementById('openPickerBtn');
             if(openBtn){ openBtn.disabled = false; openBtn.style.opacity = '1'; }
             const isRunningHubNow = runninghubContext || detectedProtocol === 'runninghub';
@@ -3113,6 +3111,7 @@ async function testConnection(){
 let lastFetchedAll = [];          // 全部模型 id 列表
 let lastFetchedSuggestion = null; // 后端自动分类建议
 let lastFetchedModelNames = {};   // {模型 id: 展示名}
+let lastFetchedModelMetadata = {}; // {模型 id: 上游元数据}
 
 function setFetchedModelState(data){
     lastFetchedAll = Array.isArray(data?.all) ? data.all : [];
@@ -3120,8 +3119,27 @@ function setFetchedModelState(data){
         image: new Set(data?.image_models || []),
         chat: new Set(data?.chat_models || []),
         video: new Set(data?.video_models || []),
+        audio: new Set(data?.audio_models || []),
     };
     lastFetchedModelNames = (data?.model_names && typeof data.model_names === 'object') ? {...data.model_names} : {};
+    lastFetchedModelMetadata = (data?.model_metadata && typeof data.model_metadata === 'object') ? {...data.model_metadata} : {};
+    const item = provider();
+    if(item){
+        const saved = (item.model_metadata && typeof item.model_metadata === 'object') ? item.model_metadata : {};
+        item.model_metadata = {...saved};
+        Object.entries(lastFetchedModelMetadata).forEach(([id, remote]) => {
+            const old = saved[id] && typeof saved[id] === 'object' ? saved[id] : {};
+            item.model_metadata[id] = {
+                ...old,
+                ...remote,
+                id,
+                description_override:String(old.description_override || '')
+            };
+        });
+        renderModels('image');
+        renderModels('video');
+        renderModels('audio');
+    }
 }
 const RH_KNOWN_MODEL_LABELS = {
     'gpt-image-2.0/text-to-image-channel-low-price':'全能图片G2 · 文生图 · 低价渠道版',
@@ -3183,7 +3201,14 @@ function runningHubReadableModelName(model, item){
     return raw;
 }
 function modelDisplayName(model, item){
+    const metadata = item?.model_metadata && typeof item.model_metadata === 'object' ? item.model_metadata[model] : null;
+    const metadataName = String(metadata?.display_name || '').trim();
+    if(metadataName) return metadataName;
     return isRunningHubLike(item) ? runningHubReadableModelName(model, item) : String(model || '');
+}
+function modelDescription(model, item){
+    const metadata = item?.model_metadata && typeof item.model_metadata === 'object' ? item.model_metadata[model] : null;
+    return String(metadata?.description_override || metadata?.description || '').trim();
 }
 function providerModelBadge(model, label){
     const text = `${model || ''} ${label || ''}`.toLowerCase();
@@ -3259,21 +3284,28 @@ let pickerVisibleIds = [];
 function openModelPicker(){
     const item = provider();
     if(!item || !lastFetchedAll.length){ alert('没有拉取到模型'); return; }
-    const existing = { image: new Set(item.image_models||[]), chat: new Set(item.chat_models||[]), video: new Set(item.video_models||[]) };
-    const allIds = new Set([...lastFetchedAll, ...(item.image_models||[]), ...(item.chat_models||[]), ...(item.video_models||[])]);
+    const existing = {
+        image: new Set(item.image_models||[]),
+        chat: new Set(item.chat_models||[]),
+        video: new Set(item.video_models||[]),
+        audio: new Set(item.audio_models||[])
+    };
+    const allIds = new Set([...lastFetchedAll, ...(item.image_models||[]), ...(item.chat_models||[]), ...(item.video_models||[]), ...(item.audio_models||[])]);
     pickerState = { category: {}, selected: {} };
     allIds.forEach(id => {
         // 类别归属：用户已配置 > 关键字建议 > 默认 chat
         let cat;
         if(existing.image.has(id)) cat = 'image';
         else if(existing.video.has(id)) cat = 'video';
+        else if(existing.audio.has(id)) cat = 'audio';
         else if(existing.chat.has(id)) cat = 'chat';
         else if(lastFetchedSuggestion?.image?.has(id)) cat = 'image';
         else if(lastFetchedSuggestion?.video?.has(id)) cat = 'video';
+        else if(lastFetchedSuggestion?.audio?.has(id)) cat = 'audio';
         else cat = 'chat';
         pickerState.category[id] = cat;
         // 默认勾选状态：已在用户配置里的 = 勾选；新拉的 = 不勾选（让用户主动选）
-        pickerState.selected[id] = existing.image.has(id) || existing.chat.has(id) || existing.video.has(id);
+        pickerState.selected[id] = existing.image.has(id) || existing.chat.has(id) || existing.video.has(id) || existing.audio.has(id);
     });
     // 默认 tab 切回「全部」
     document.querySelectorAll('.picker-cat-tab').forEach(t => t.classList.toggle('active', t.dataset.cat === 'all'));
@@ -3287,8 +3319,8 @@ function renderModelPicker(){
     const currentTab = document.querySelector('.picker-cat-tab.active')?.dataset.cat || 'all';
     const ids = Object.keys(pickerState.category).sort();
     // 各分类总数 / 已选数
-    const totals = { all: ids.length, image:0, chat:0, video:0 };
-    const selecteds = { all:0, image:0, chat:0, video:0 };
+    const totals = { all: ids.length, image:0, chat:0, video:0, audio:0 };
+    const selecteds = { all:0, image:0, chat:0, video:0, audio:0 };
     ids.forEach(id => {
         const cat = pickerState.category[id];
         totals[cat]++;
@@ -3312,6 +3344,7 @@ function renderModelPicker(){
         const checked = pickerState.selected[id];
         const label = modelDisplayName(id, item);
         const badge = providerModelBadge(id, label);
+        const note = modelDescription(id, item);
         return `
             <div class="picker-row ${checked?'has-sel':''}" onclick="togglePickerRowByIndex(${index})">
                 <div class="picker-checkbox ${checked?'checked':''}">
@@ -3321,6 +3354,7 @@ function renderModelPicker(){
                 <div class="picker-model-name" title="${escapeAttr(id)}">
                     <div class="picker-model-label">${escapeHtml(label || id)}</div>
                     ${label && label !== id ? `<div class="picker-model-id">${escapeHtml(id)}</div>` : ''}
+                    ${note ? `<div class="picker-model-id">${escapeHtml(note)}</div>` : ''}
                 </div>
             </div>
         `;
@@ -3330,10 +3364,12 @@ function renderModelPicker(){
     const sumImage = document.getElementById('sumImage');
     const sumChat = document.getElementById('sumChat');
     const sumVideo = document.getElementById('sumVideo');
+    const sumAudio = document.getElementById('sumAudio');
     const sumUnsel = document.getElementById('sumUnsel');
     if(sumImage){ sumImage.textContent = `生图 ${selecteds.image}`; sumImage.classList.toggle('picker-sum-chip-empty', selecteds.image === 0); }
     if(sumChat){ sumChat.textContent = `LLM ${selecteds.chat}`; sumChat.classList.toggle('picker-sum-chip-empty', selecteds.chat === 0); }
     if(sumVideo){ sumVideo.textContent = `视频 ${selecteds.video}`; sumVideo.classList.toggle('picker-sum-chip-empty', selecteds.video === 0); }
+    if(sumAudio){ sumAudio.textContent = `音频 ${selecteds.audio}`; sumAudio.classList.toggle('picker-sum-chip-empty', selecteds.audio === 0); }
     if(sumUnsel){ sumUnsel.textContent = `未选 ${totals.all - selecteds.all}`; }
 }
 function togglePickerRow(id){
@@ -3351,13 +3387,14 @@ function selectPickerCat(cat){
 }
 function applyModelPicker(){
     const item = provider(); if(!item) return;
-    const image = [], chat = [], video = [];
+    const image = [], chat = [], video = [], audio = [];
     const modelNames = {};
     Object.entries(pickerState.selected).forEach(([id, sel]) => {
         if(!sel) return;
         const cat = pickerState.category[id];
         if(cat === 'image') image.push(id);
         else if(cat === 'video') video.push(id);
+        else if(cat === 'audio') audio.push(id);
         else chat.push(id);
         const label = modelDisplayName(id, item);
         if(label && label !== id) modelNames[id] = label;
@@ -3365,10 +3402,13 @@ function applyModelPicker(){
     item.image_models = image;
     item.chat_models = chat;
     item.video_models = video;
+    item.audio_models = audio;
+    item.default_audio_model = audio.includes(item.default_audio_model) ? item.default_audio_model : (audio[0] || '');
     item.model_names = modelNames;
-    renderModels('image'); renderModels('chat'); renderModels('video');
+    renderModels('image'); renderModels('chat'); renderModels('video'); renderModels('audio');
+    renderDefaultAudioModel();
     renderMsLoras();
-    setStatus(`已应用 · 生图 ${image.length} / LLM ${chat.length} / 视频 ${video.length}，点保存生效`);
+    setStatus(`已应用 · 生图 ${image.length} / LLM ${chat.length} / 视频 ${video.length} / 音频 ${audio.length}，点保存生效`);
     closeModelPicker();
 }
 async function saveKeyOnly(){
@@ -3394,7 +3434,7 @@ function providerSupportsModelProtocol(item){
     return Boolean(item) && !FIXED_PROTOCOL_PROVIDER_IDS.has(item.id);
 }
 function modelProtocolSelectHtml(kind, index, model, item){
-    if(kind === 'video' || !providerSupportsModelProtocol(item)) return '';
+    if(kind === 'video' || kind === 'audio' || !providerSupportsModelProtocol(item)) return '';
     const map = (item.model_protocols && typeof item.model_protocols === 'object') ? item.model_protocols : {};
     const current = String(map[String(model || '').trim()] || '').toLowerCase();
     const opt = (val, label) => `<option value="${val}" ${current === val ? 'selected' : ''}>${label}</option>`;
@@ -3406,21 +3446,23 @@ function modelProtocolSelectHtml(kind, index, model, item){
 }
 function renderModels(kind){
     const item = provider();
-    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
-    const list = kind === 'image' ? imageModelList : kind === 'video' ? videoModelList : chatModelList;
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : kind === 'audio' ? 'audio_models' : 'chat_models';
+    const list = kind === 'image' ? imageModelList : kind === 'video' ? videoModelList : kind === 'audio' ? audioModelList : chatModelList;
     const models = item?.[key] || [];
     if(!models.length){
         list.innerHTML = `<div class="empty">${tr('api.noModels')}</div>`;
         return;
     }
-    const showProtocol = kind !== 'video' && providerSupportsModelProtocol(item);
+    const showProtocol = !['video','audio'].includes(kind) && providerSupportsModelProtocol(item);
     list.innerHTML = models.map((model, index) => {
         const label = modelDisplayName(model, item);
+        const note = modelDescription(model, item);
         return `
             <div class="model-row${showProtocol ? ' has-protocol' : ''}">
                 <div class="model-id-field">
                     ${label && label !== model ? `<div class="model-display-name">${escapeHtml(label)}</div>` : ''}
-                    <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value)">
+                    <input value="${escapeAttr(model)}" oninput="updateModel('${kind}', ${index}, this.value, this)">
+                    <textarea class="model-description-input" rows="2" placeholder="模型备注（清空后显示接口默认备注）" oninput="updateModelDescription('${kind}', ${index}, this.value)" onblur="restoreDefaultModelDescription('${kind}', ${index}, this)">${escapeHtml(note)}</textarea>
                 </div>
                 ${modelProtocolSelectHtml(kind, index, model, item)}
                 <button class="icon-btn" type="button" onclick="removeModel('${kind}', ${index})" title="删除"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
@@ -3428,6 +3470,53 @@ function renderModels(kind){
         `;
     }).join('');
     refreshIcons();
+    if(kind === 'audio') renderDefaultAudioModel();
+}
+
+function renderDefaultAudioModel(){
+    if(!defaultAudioModelSelect) return;
+    const item = provider();
+    const models = unique(item?.audio_models || []);
+    const selected = models.includes(item?.default_audio_model) ? item.default_audio_model : (models[0] || '');
+    if(item) item.default_audio_model = selected;
+    defaultAudioModelSelect.innerHTML = models.length
+        ? models.map(model => `<option value="${escapeAttr(model)}" ${model === selected ? 'selected' : ''}>${escapeHtml(modelDisplayName(model, item) || model)}</option>`).join('')
+        : `<option value="">暂无音频模型</option>`;
+    defaultAudioModelSelect.disabled = !models.length;
+}
+function updateDefaultAudioModel(value){
+    const item = provider();
+    if(item) item.default_audio_model = String(value || '').trim();
+}
+function updateModelDescription(kind, index, value){
+    const item = provider();
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : kind === 'audio' ? 'audio_models' : 'chat_models';
+    const model = String(item?.[key]?.[index] || '').trim();
+    if(!item || !model) return;
+    if(!item.model_metadata || typeof item.model_metadata !== 'object') item.model_metadata = {};
+    const remote = lastFetchedModelMetadata[model] && typeof lastFetchedModelMetadata[model] === 'object'
+        ? lastFetchedModelMetadata[model]
+        : {};
+    const old = item.model_metadata[model] && typeof item.model_metadata[model] === 'object'
+        ? item.model_metadata[model]
+        : {};
+    const effectiveDefault = String(old.description || remote.description || '').trim();
+    const typed = String(value || '').trim();
+    item.model_metadata[model] = {
+        ...remote,
+        ...old,
+        id:model,
+        category:kind,
+        description:effectiveDefault,
+        description_override:typed && typed !== effectiveDefault ? typed : ''
+    };
+}
+function restoreDefaultModelDescription(kind, index, input){
+    if(String(input?.value || '').trim()) return;
+    const item = provider();
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : kind === 'audio' ? 'audio_models' : 'chat_models';
+    const model = String(item?.[key]?.[index] || '').trim();
+    if(input && model) input.value = modelDescription(model, item);
 }
 function msLoraTargetOptions(selected){
     const item = provider();
@@ -3517,7 +3606,7 @@ function addProvider(){
     let id = 'custom-api';
     let index = 2;
     while(providers.some(item => item.id === id)) id = `custom-api-${index++}`;
-    providers.push({id, name:'API', base_url:'', protocol:'openai', image_request_mode:'openai', image_edit_route:'general', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], has_key:false, key_preview:''});
+    providers.push({id, name:'API', base_url:'', protocol:'openai', image_request_mode:'openai', image_edit_route:'general', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], audio_models:[], default_audio_model:'', model_metadata:{}, has_key:false, key_preview:''});
     selectedId = id;
     renderEditor();
 }
@@ -3633,19 +3722,19 @@ async function clearVolcengineAssetKeys(){
 }
 function addModel(kind){
     const item = provider();
-    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : kind === 'audio' ? 'audio_models' : 'chat_models';
     item[key] = [...(item[key] || []), ''];
     renderModels(kind);
     if(kind === 'image') renderMsLoras();
 }
 function modelProtocolStillUsed(item, name){
     if(!item || !name) return false;
-    const lists = ['image_models', 'chat_models', 'video_models'];
+    const lists = ['image_models', 'chat_models', 'video_models', 'audio_models'];
     return lists.some(k => Array.isArray(item[k]) && item[k].includes(name));
 }
-function updateModel(kind, index, value){
+function updateModel(kind, index, value, input=null){
     const item = provider();
-    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : kind === 'audio' ? 'audio_models' : 'chat_models';
     const oldName = String(item[key][index] || '').trim();
     const newName = String(value || '').trim();
     item[key][index] = value;
@@ -3655,7 +3744,7 @@ function updateModel(kind, index, value){
             const proto = item.model_protocols[oldName];
             // 旧名称在其他列表里不再使用时才删除旧键
             const stillUsedElsewhere = (() => {
-                const lists = ['image_models', 'chat_models', 'video_models'];
+                const lists = ['image_models', 'chat_models', 'video_models', 'audio_models'];
                 return lists.some(k => Array.isArray(item[k]) && item[k].some((m, i) => !(k === key && i === index) && String(m || '').trim() === oldName));
             })();
             if(!stillUsedElsewhere) delete item.model_protocols[oldName];
@@ -3669,11 +3758,23 @@ function updateModel(kind, index, value){
             if(newName && label && label !== newName) item.model_names[newName] = label;
         }
     }
+    if(item.model_metadata && typeof item.model_metadata === 'object' && oldName && oldName !== newName){
+        if(!modelProtocolStillUsed(item, oldName)) delete item.model_metadata[oldName];
+        if(newName){
+            const remote = lastFetchedModelMetadata[newName] && typeof lastFetchedModelMetadata[newName] === 'object'
+                ? lastFetchedModelMetadata[newName]
+                : {};
+            item.model_metadata[newName] = {...remote, id:newName, category:kind, description_override:''};
+        }
+        const noteInput = input?.closest('.model-id-field')?.querySelector('.model-description-input');
+        if(noteInput) noteInput.value = newName ? modelDescription(newName, item) : '';
+    }
+    if(kind === 'audio') renderDefaultAudioModel();
     if(kind === 'image') renderMsLoras();
 }
 function updateModelProtocol(kind, index, value){
     const item = provider();
-    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : kind === 'audio' ? 'audio_models' : 'chat_models';
     const name = String(item[key]?.[index] || '').trim();
     if(!name) return;
     if(!item.model_protocols || typeof item.model_protocols !== 'object') item.model_protocols = {};
@@ -3686,7 +3787,7 @@ function updateModelProtocol(kind, index, value){
 }
 function removeModel(kind, index){
     const item = provider();
-    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : 'chat_models';
+    const key = kind === 'image' ? 'image_models' : kind === 'video' ? 'video_models' : kind === 'audio' ? 'audio_models' : 'chat_models';
     const removed = String(item[key][index] || '').trim();
     item[key].splice(index, 1);
     // 清理不再使用的协议覆盖
@@ -3695,6 +3796,12 @@ function removeModel(kind, index){
     }
     if(removed && item.model_names && typeof item.model_names === 'object' && !modelProtocolStillUsed(item, removed)){
         delete item.model_names[removed];
+    }
+    if(removed && item.model_metadata && typeof item.model_metadata === 'object' && !modelProtocolStillUsed(item, removed)){
+        delete item.model_metadata[removed];
+    }
+    if(kind === 'audio' && item.default_audio_model === removed){
+        item.default_audio_model = item.audio_models[0] || '';
     }
     renderModels(kind);
     if(kind === 'image') renderMsLoras();
@@ -3739,20 +3846,34 @@ async function saveProviders(){
             item.image_models = unique(item.image_models || []);
             item.chat_models = unique(item.chat_models || []);
             item.video_models = unique(item.video_models || []);
+            item.audio_models = unique(item.audio_models || []);
         }
         item.image_generation_endpoint = '';
         item.image_edit_endpoint = '';
         item.image_models = unique(item.image_models || []);
         item.chat_models = unique(item.chat_models || []);
         item.video_models = unique(item.video_models || []);
+        item.audio_models = unique(item.audio_models || []);
+        item.default_audio_model = item.audio_models.includes(item.default_audio_model)
+            ? item.default_audio_model
+            : (item.audio_models[0] || '');
         const modelNameSource = (item.model_names && typeof item.model_names === 'object') ? item.model_names : {};
         const modelNameMap = {};
-        [...item.image_models, ...item.chat_models, ...item.video_models].forEach(model => {
+        [...item.image_models, ...item.chat_models, ...item.video_models, ...item.audio_models].forEach(model => {
             const raw = String(model || '').trim();
             const label = String(modelNameSource[raw] || modelDisplayName(raw, item) || '').trim();
             if(raw && label && label !== raw) modelNameMap[raw] = label;
         });
         item.model_names = modelNameMap;
+        const metadataSource = item.model_metadata && typeof item.model_metadata === 'object' ? item.model_metadata : {};
+        const metadata = {};
+        [...item.image_models, ...item.chat_models, ...item.video_models, ...item.audio_models].forEach(model => {
+            const raw = String(model || '').trim();
+            const saved = metadataSource[raw] && typeof metadataSource[raw] === 'object' ? metadataSource[raw] : {};
+            const remote = lastFetchedModelMetadata[raw] && typeof lastFetchedModelMetadata[raw] === 'object' ? lastFetchedModelMetadata[raw] : {};
+            if(raw) metadata[raw] = {...remote, ...saved, id:raw};
+        });
+        item.model_metadata = metadata;
         item.rh_apps = normalizeRhEntries(item.rh_apps || [], 'app');
         item.rh_workflows = normalizeRhEntries(item.rh_workflows || [], 'workflow');
         item.ms_loras = (Array.isArray(item.ms_loras) ? item.ms_loras : []).map(lora => ({
@@ -3787,7 +3908,10 @@ async function saveProviders(){
                 image_models:item.image_models || [],
                 chat_models:item.chat_models || [],
                 video_models:item.video_models || [],
+                audio_models:item.audio_models || [],
+                default_audio_model:item.default_audio_model || '',
                 model_names:(item.model_names && typeof item.model_names === 'object') ? item.model_names : {},
+                model_metadata:(item.model_metadata && typeof item.model_metadata === 'object') ? item.model_metadata : {},
                 model_protocols:(item.model_protocols && typeof item.model_protocols === 'object') ? item.model_protocols : {},
                 ms_loras:item.id === 'modelscope' ? (item.ms_loras || []) : [],
                 ms_defaults_version:item.id === 'modelscope' ? (item.ms_defaults_version || 1) : 0,

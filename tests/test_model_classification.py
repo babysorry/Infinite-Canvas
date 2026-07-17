@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 import main
 from fastapi import Response
@@ -49,9 +50,52 @@ class UpstreamModelClassificationTests(unittest.TestCase):
                     "grok-imagine-video-reference",
                     "seedance-2.0-mini",
                 ],
+                "audio": [],
             },
         )
         self.assertEqual(model_ids, sorted(model_ids))
+
+    def test_upstream_category_takes_priority_over_model_name_guessing(self):
+        grouped, _ = main.parse_upstream_models(
+            {
+                "data": [
+                    {
+                        "id": "looks-like-video",
+                        "category": "audio",
+                        "display_name": "Dialogue",
+                        "description": "Multi-role speech",
+                    },
+                    {
+                        "id": "minimax-speech-2.6-hd",
+                        "category": "audio",
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(grouped["audio"], ["looks-like-video", "minimax-speech-2.6-hd"])
+        self.assertEqual(grouped["video"], [])
+
+    def test_model_metadata_is_preserved_from_models_protocol(self):
+        raw = {
+            "data": [
+                {
+                    "id": "minimax-speech-2.6-hd",
+                    "display_name": "MiniMax Speech 2.6 HD",
+                    "description": "中文与多语言高质量旁白和配音。",
+                    "category": "audio",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["audio"],
+                    "capabilities": ["text-to-speech", "voice-control"],
+                }
+            ]
+        }
+
+        metadata = main.upstream_model_metadata(raw)
+
+        self.assertEqual(metadata["minimax-speech-2.6-hd"]["category"], "audio")
+        self.assertEqual(metadata["minimax-speech-2.6-hd"]["display_name"], "MiniMax Speech 2.6 HD")
+        self.assertEqual(metadata["minimax-speech-2.6-hd"]["description_override"], "")
 
 
 class SavedProviderCompatibilityTests(unittest.TestCase):
@@ -81,6 +125,163 @@ class SavedProviderCompatibilityTests(unittest.TestCase):
         asyncio.run(main.ai_config(response))
 
         self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_legacy_string_models_and_audio_metadata_normalize_together(self):
+        provider = main.normalize_provider(
+            {
+                "id": "local-fal",
+                "name": "Local Fal",
+                "base_url": "http://127.0.0.1:8787/v1",
+                "image_models": ["gpt-image-2"],
+                "video_models": ["seedance-2.0-mini"],
+                "audio_models": ["minimax-speech-2.6-hd", "eleven-v3-dialogue"],
+                "default_audio_model": "eleven-v3-dialogue",
+                "model_metadata": {
+                    "minimax-speech-2.6-hd": {
+                        "id": "minimax-speech-2.6-hd",
+                        "description": "remote default",
+                        "description_override": "my note",
+                        "category": "audio",
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(provider["image_models"], ["gpt-image-2"])
+        self.assertEqual(provider["audio_models"], ["minimax-speech-2.6-hd", "eleven-v3-dialogue"])
+        self.assertEqual(provider["default_audio_model"], "eleven-v3-dialogue")
+        self.assertEqual(
+            provider["model_metadata"]["minimax-speech-2.6-hd"]["description_override"],
+            "my note",
+        )
+
+
+class CanvasAudioTests(unittest.TestCase):
+    def test_minimax_request_contains_only_supported_mvp_fields(self):
+        body = main.canvas_audio_request_body(
+            main.CanvasAudioRequest(
+                model="minimax-speech-2.6-hd",
+                prompt="欢迎来到今天的节目。",
+                voice="Chinese (Mandarin)_Warm_Bestie",
+                speed=1.1,
+                language_boost="Chinese",
+                format="mp3",
+                language_code="zh",
+                stability=0.5,
+            )
+        )
+
+        self.assertEqual(body["voice_setting"]["voice_id"], "Chinese (Mandarin)_Warm_Bestie")
+        self.assertEqual(body["voice_setting"]["speed"], 1.1)
+        self.assertEqual(body["audio_setting"], {"format": "mp3"})
+        self.assertNotIn("language_code", body)
+        self.assertNotIn("stability", body)
+
+    def test_eleven_single_role_request(self):
+        body = main.canvas_audio_request_body(
+            main.CanvasAudioRequest(
+                model="eleven-v3-dialogue",
+                prompt="[excited] 我们开始吧！",
+                voice="Aria",
+            )
+        )
+
+        self.assertEqual(
+            body,
+            {
+                "model": "eleven-v3-dialogue",
+                "prompt": "[excited] 我们开始吧！",
+                "voice": "Aria",
+            },
+        )
+
+    def test_eleven_multi_role_request_preserves_order(self):
+        body = main.canvas_audio_request_body(
+            main.CanvasAudioRequest(
+                model="eleven-v3-dialogue",
+                inputs=[
+                    main.CanvasAudioDialogueInput(voice="Aria", text="你准备好了吗？"),
+                    main.CanvasAudioDialogueInput(voice="Charlotte", text="[laughs] 当然。"),
+                ],
+                language_code="zh",
+                stability=0.5,
+                use_speaker_boost=True,
+            )
+        )
+
+        self.assertEqual([item["voice"] for item in body["inputs"]], ["Aria", "Charlotte"])
+        self.assertEqual(body["language_code"], "zh")
+        self.assertTrue(body["use_speaker_boost"])
+        self.assertNotIn("prompt", body)
+
+    def test_audio_result_normalizes_relative_url_and_media_shape(self):
+        result = main.normalize_canvas_audio_result(
+            {
+                "id": "audio_123",
+                "status": "completed",
+                "audio": {"url": "/output/result.mp3", "content_type": "audio/mpeg"},
+            },
+            {"base_url": "http://127.0.0.1:8787/v1"},
+        )
+
+        self.assertEqual(result["audio"]["kind"], "audio")
+        self.assertEqual(result["audio"]["url"], "http://127.0.0.1:8787/output/result.mp3")
+        self.assertEqual(result["audios"][0]["mime"], "audio/mpeg")
+
+    def test_polling_queries_existing_task_without_recreating_it(self):
+        class FakeResponse:
+            status_code = 200
+            text = "json"
+
+            @staticmethod
+            def json():
+                return {
+                    "id": "audio_poll",
+                    "status": "in_progress",
+                    "model": "minimax-speech-2.6-hd",
+                }
+
+        class FakeClient:
+            posts = 0
+            gets = 0
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, *args, **kwargs):
+                FakeClient.gets += 1
+                return FakeResponse()
+
+            async def post(self, *args, **kwargs):
+                FakeClient.posts += 1
+                return FakeResponse()
+
+        main.CANVAS_AUDIO_TASKS["audio_poll"] = {
+            "provider_id": "local-fal",
+            "model": "minimax-speech-2.6-hd",
+            "status": "queued",
+        }
+        provider = {
+            "id": "local-fal",
+            "base_url": "http://127.0.0.1:8787/v1",
+        }
+        try:
+            with patch.object(main, "get_api_provider_exact", return_value=provider), patch.object(
+                main.httpx, "AsyncClient", FakeClient
+            ), patch.object(main, "api_headers", return_value={}):
+                result = asyncio.run(main.canvas_audio_status("audio_poll"))
+        finally:
+            main.CANVAS_AUDIO_TASKS.pop("audio_poll", None)
+
+        self.assertEqual(result["status"], "in_progress")
+        self.assertEqual(FakeClient.gets, 1)
+        self.assertEqual(FakeClient.posts, 0)
 
 
 class LocalFalVideoPayloadTests(unittest.TestCase):

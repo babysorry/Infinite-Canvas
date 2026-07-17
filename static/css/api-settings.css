@@ -213,6 +213,9 @@ body.studio-theme-dark .model-row { background:var(--soft); border-color:var(--l
 .model-id-field { min-width:0; display:flex; flex-direction:column; gap:2px; }
 .model-id-field input { width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 .model-display-name { padding:5px 10px 0; color:var(--text); font-size:12px; line-height:1.25; font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.model-description-input { width:100%; min-height:48px; padding:7px 10px; resize:vertical; border:0; border-top:1px solid var(--line); background:transparent; color:var(--muted); font-size:11.5px; line-height:1.45; }
+.model-description-input:focus { outline:none; color:var(--text); }
+.audio-default-field { margin-bottom:10px; }
 .model-protocol-select { height:30px; padding:0 8px; border:1px solid var(--line); border-radius:8px; background:var(--soft); color:var(--text); font-size:11.5px; font-weight:700; outline:none; cursor:pointer; min-width:74px; }
 body.studio-theme-dark .model-protocol-select { background:var(--panel); border-color:var(--line-strong); }
 .ms-lora-block { display:none; }

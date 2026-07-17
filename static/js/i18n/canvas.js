@@ -68,6 +68,7 @@
         "canvas.apiGenerate": { zh: "API生成", en: "API Generate" },
         "canvas.msGenerate": { zh: "Modelscope生成", en: "Modelscope Generate" },
         "canvas.videoGenerate": { zh: "视频生成", en: "Video Generate" },
+        "canvas.audioGenerateNode": { zh: "音频生成", en: "Audio Generate" },
         "canvas.group": { zh: "分组", en: "Group" },
         "canvas.logs": { zh: "日志", en: "Logs" },
         "canvas.generationLogs": { zh: "生成日志", en: "Generation Logs" },
