@@ -3281,6 +3281,18 @@ async function fetchModels(){
 // 每个模型只归一类（根据用户已配置 或 关键字猜测）；勾选 = 纳入该分类
 let pickerState = { category: {}, selected: {} };
 let pickerVisibleIds = [];
+function upstreamDeclaresAudioModel(id){
+    const metadata = lastFetchedModelMetadata?.[id];
+    if(!metadata || typeof metadata !== 'object') return false;
+    const category = String(metadata.category || '').trim().toLowerCase();
+    const outputs = new Set(
+        (Array.isArray(metadata.output_modalities) ? metadata.output_modalities : [])
+            .map(value => String(value || '').trim().toLowerCase())
+            .filter(Boolean)
+    );
+    return category === 'audio'
+        || (outputs.has('audio') && !outputs.has('image') && !outputs.has('video'));
+}
 function openModelPicker(){
     const item = provider();
     if(!item || !lastFetchedAll.length){ alert('没有拉取到模型'); return; }
@@ -3293,15 +3305,16 @@ function openModelPicker(){
     const allIds = new Set([...lastFetchedAll, ...(item.image_models||[]), ...(item.chat_models||[]), ...(item.video_models||[]), ...(item.audio_models||[])]);
     pickerState = { category: {}, selected: {} };
     allIds.forEach(id => {
-        // 类别归属：用户已配置 > 关键字建议 > 默认 chat
+        // 明确的上游音频分类优先于旧配置，修复历史上误存到 chat_models 的模型。
+        // 其他类别仍保留“用户已配置 > 上游建议 > 默认 chat”的既有优先级。
         let cat;
-        if(existing.image.has(id)) cat = 'image';
+        if(upstreamDeclaresAudioModel(id) || lastFetchedSuggestion?.audio?.has(id)) cat = 'audio';
+        else if(existing.image.has(id)) cat = 'image';
         else if(existing.video.has(id)) cat = 'video';
         else if(existing.audio.has(id)) cat = 'audio';
         else if(existing.chat.has(id)) cat = 'chat';
         else if(lastFetchedSuggestion?.image?.has(id)) cat = 'image';
         else if(lastFetchedSuggestion?.video?.has(id)) cat = 'video';
-        else if(lastFetchedSuggestion?.audio?.has(id)) cat = 'audio';
         else cat = 'chat';
         pickerState.category[id] = cat;
         // 默认勾选状态：已在用户配置里的 = 勾选；新拉的 = 不勾选（让用户主动选）

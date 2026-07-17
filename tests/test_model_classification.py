@@ -119,6 +119,60 @@ class SavedProviderCompatibilityTests(unittest.TestCase):
             ["grok-imagine-video", "seedance-2.0-mini"],
         )
 
+    def test_audio_metadata_migrates_models_out_of_legacy_chat_list(self):
+        provider = main.normalize_provider(
+            {
+                "id": "local-fal",
+                "name": "Local Fal",
+                "base_url": "http://127.0.0.1:8787/v1",
+                "chat_models": [
+                    "gpt-5.5",
+                    "eleven-v3-dialogue",
+                    "minimax-speech-2.6-hd",
+                ],
+                "audio_models": [],
+                "model_metadata": {
+                    "eleven-v3-dialogue": {
+                        "id": "eleven-v3-dialogue",
+                        "category": "audio",
+                        "output_modalities": ["audio"],
+                    },
+                    "minimax-speech-2.6-hd": {
+                        "id": "minimax-speech-2.6-hd",
+                        "category": "chat",
+                        "output_modalities": ["audio"],
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(provider["chat_models"], ["gpt-5.5"])
+        self.assertEqual(
+            provider["audio_models"],
+            ["eleven-v3-dialogue", "minimax-speech-2.6-hd"],
+        )
+        self.assertEqual(provider["default_audio_model"], "eleven-v3-dialogue")
+
+    def test_video_with_audio_output_is_not_migrated_to_audio(self):
+        provider = main.normalize_provider(
+            {
+                "id": "local-fal",
+                "name": "Local Fal",
+                "base_url": "http://127.0.0.1:8787/v1",
+                "chat_models": ["multimodal-generator"],
+                "model_metadata": {
+                    "multimodal-generator": {
+                        "id": "multimodal-generator",
+                        "category": "chat",
+                        "output_modalities": ["video", "audio"],
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(provider["chat_models"], ["multimodal-generator"])
+        self.assertEqual(provider["audio_models"], [])
+
     def test_canvas_config_response_disables_stale_browser_cache(self):
         response = Response()
 

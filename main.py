@@ -1299,6 +1299,7 @@ def normalize_provider(item):
     chat_models = model_list_from_values(item.get("chat_models") or [])
     video_models = model_list_from_values(item.get("video_models") or [])
     audio_models = model_list_from_values(item.get("audio_models") or [])
+    model_metadata = normalize_model_metadata_map(item.get("model_metadata"))
     # 兼容旧版自动分类结果：Seedance 曾因关键词缺失被保存到聊天模型，
     # 而画布只会从 video_models 读取视频平台与模型。
     misplaced_seedance_models = [
@@ -1309,6 +1310,28 @@ def normalize_provider(item):
         misplaced = set(misplaced_seedance_models)
         chat_models = [model for model in chat_models if model not in misplaced]
         video_models = model_list_from_values([*video_models, *misplaced_seedance_models])
+    # 兼容音频分类上线前保存的 provider：如果上游元数据明确声明为音频，
+    # 将仍留在 chat_models 的模型迁移到 audio_models。视频+音频等复合输出
+    # 不在这里自动迁移，避免改变视频模型的既有分类。
+    misplaced_audio_models = []
+    for model in chat_models:
+        metadata = model_metadata.get(model) or {}
+        category = str(metadata.get("category") or "").strip().lower()
+        output_modalities = {
+            str(modality or "").strip().lower()
+            for modality in (metadata.get("output_modalities") or [])
+            if str(modality or "").strip()
+        }
+        declares_audio = category == "audio" or (
+            "audio" in output_modalities
+            and not output_modalities.intersection({"image", "video"})
+        )
+        if declares_audio:
+            misplaced_audio_models.append(model)
+    if misplaced_audio_models:
+        misplaced = set(misplaced_audio_models)
+        chat_models = [model for model in chat_models if model not in misplaced]
+        audio_models = model_list_from_values([*audio_models, *misplaced_audio_models])
     if locked_rule and "video_models" in locked_rule:
         video_models = model_list_from_values(locked_rule.get("video_models") or [])
     return {
@@ -1331,7 +1354,7 @@ def normalize_provider(item):
             else (audio_models[0] if audio_models else "")
         ),
         "model_names": normalize_model_name_map(item.get("model_names")),
-        "model_metadata": normalize_model_metadata_map(item.get("model_metadata")),
+        "model_metadata": model_metadata,
         "model_protocols": normalize_model_protocols(item.get("model_protocols")),
         "ms_loras": normalize_ms_loras(item.get("ms_loras") or []),
         "ms_defaults_version": int(item.get("ms_defaults_version") or 0),
